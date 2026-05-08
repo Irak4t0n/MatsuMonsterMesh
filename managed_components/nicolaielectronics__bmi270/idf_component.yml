@@ -1,0 +1,5 @@
+repository: git://github.com/Nicolai-Electronics/esp32-component-bmi270.git
+repository_info:
+  commit_sha: 13e136eb0a395c777d13ac1df212f0fbd51d029f
+  path: .
+version: 1.0.1

@@ -1,0 +1,22 @@
+menu "MatsuMonsterMesh / MeshtasticRadio"
+
+    config MATSUMONSTER_MESH_STUB
+        bool "Use StubMeshtasticRadio (no real radio I/O)"
+        default y
+        help
+            When enabled, MatsuMonsterMesh instantiates StubMeshtasticRadio
+            in main.c — every send is logged via ESP_LOGI(MMRadio) and
+            pollPackets() always returns 0. This lets the project build and
+            run on a device whose ESP32-C6 radio coprocessor has not been
+            flashed with Meshtastic firmware yet.
+
+            Disable this to instantiate SerialMeshtasticRadio. NOTE: as of
+            this Step 4 the serial transport is itself a stub — the Tanmatsu
+            P4-to-C6 link is SDIO (BSP_SDIO_* in tanmatsu_hardware.h), not
+            UART, so a real implementation requires either a custom
+            serial-over-SDIO transport on top of ESP-Hosted, or replacing
+            ESP-Hosted on the C6 with Meshtastic firmware that exposes a
+            serial endpoint over the SDIO link. See the block comment in
+            meshtastic_radio_serial.cpp for the open questions.
+
+endmenu

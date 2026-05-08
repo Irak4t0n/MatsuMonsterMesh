@@ -1,0 +1,20 @@
+menu "Custom certificates"
+	config CUSTOM_CA_LETSENCRYPT_X1
+		bool "Letsencrypt ISRG ROOT X1"
+		default y
+	config CUSTOM_CA_LETSENCRYPT_X2
+		bool "Letsencrypt ISRG ROOT X2"
+		default y
+	config CUSTOM_CA_BADGETEAM_OTA
+		bool "Self-signed: Badge.Team OTA update cloud service"
+		default n
+	config CUSTOM_CA_MCH2022_OTA
+		bool "Self-signed: Badge.Team MCH2022 OTA update cloud service"
+		default n
+	config CUSTOM_CA_TANMATSU_APPS
+		bool "Self-signed: Nicolai Electronics Tanmatsu app repository cloud service"
+		default n
+	config CUSTOM_CA_TANMATSU_OTA
+		bool "Self-signed: Nicolai Electronics Tanmatsu OTA update cloud service"
+		default n
+endmenu

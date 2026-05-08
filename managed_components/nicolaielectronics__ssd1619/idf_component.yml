@@ -1,0 +1,12 @@
+dependencies:
+  cmake_utilities: 0.*
+  idf: '>=5.4'
+description: SSD1619 e-paper display driver
+issues: https://github.com/Nicolai-Electronics/esp32-component-ssd1619/issues
+license: MIT
+repository: git://github.com/Nicolai-Electronics/esp32-component-ssd1619.git
+repository_info:
+  commit_sha: 2410d62f6555e4b9217ae6361f32ffb452556c66
+  path: .
+url: https://github.com/Nicolai-Electronics/esp32-component-ssd1619
+version: 0.0.1

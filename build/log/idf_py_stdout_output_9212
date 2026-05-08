@@ -1,0 +1,100 @@
+Command: ninja all
+[0/1] Re-running CMake...
+-- Minimal build - OFF
+-- ccache will be used for faster recompilation
+-- git rev-parse returned 'fatal: not a git repository (or any of the parent directories): .git'
+-- Could not use 'git describe' to determine PROJECT_VER.
+-- Building ESP-IDF components for target esp32p4
+NOTICE: Skipping optional dependency: badgeteam/mch2022-rp2040
+NOTICE: Processing 24 dependencies:
+NOTICE: [1/24] badgeteam/badge-bsp (0.9.5)
+NOTICE: [2/24] badgeteam/custom-certificates (1.1.0)
+NOTICE: [3/24] espressif/cmake_utilities (0.5.3)
+NOTICE: [4/24] espressif/eppp_link (1.1.5)
+NOTICE: [5/24] espressif/esp_lcd_ek79007 (1.0.4)
+NOTICE: [6/24] espressif/esp_lcd_ili9341 (2.0.2)
+NOTICE: [7/24] espressif/esp_lcd_ili9881c (1.1.0)
+NOTICE: [8/24] espressif/esp_lcd_lt8912b (0.1.3)
+NOTICE: [9/24] espressif/esp_lcd_st7701 (1.1.5)
+NOTICE: [10/24] espressif/esp_serial_slave_link (1.1.2)
+NOTICE: [11/24] espressif/led_strip (3.0.3)
+NOTICE: [12/24] espressif/wifi_remote_over_eppp (0.3.2)
+NOTICE: [13/24] nicolaielectronics/bmi270 (1.0.1)
+NOTICE: [14/24] nicolaielectronics/es8156 (0.0.3)
+NOTICE: [15/24] nicolaielectronics/esp-hosted-tanmatsu (2.12.3)
+NOTICE: [16/24] nicolaielectronics/esp-wifi-remote-tanmatsu (1.4.2)
+NOTICE: [17/24] nicolaielectronics/mipi_dsi_abstraction (0.3.3)
+NOTICE: [18/24] nicolaielectronics/mpr121 (0.0.2)
+NOTICE: [19/24] nicolaielectronics/ssd1619 (0.0.1)
+NOTICE: [20/24] nicolaielectronics/tanmatsu-wifi (1.2.0)
+NOTICE: [21/24] nicolaielectronics/tanmatsu_coprocessor (0.7.0)
+NOTICE: [22/24] nicolaielectronics/wifi-manager (0.3.0)
+NOTICE: [23/24] robotman2412/pax-gfx (2.0.9)
+NOTICE: [24/24] idf (5.5.1)
+-- Using new driver components (IDF ≥ 5.0)
+NOTICE: Skipping optional dependency: badgeteam/mch2022-rp2040
+-- Project sdkconfig file C:/Users/Howar/MatsuMonsterMesh/sdkconfig
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/riscv/ld/rom.api.ld
+-- USING O3
+-- App "MatsuMonsterMesh" version: 1
+-- Adding linker script C:/Users/Howar/MatsuMonsterMesh/build/esp-idf/esp_system/ld/memory.ld
+-- Adding linker script C:/Users/Howar/MatsuMonsterMesh/build/esp-idf/esp_system/ld/sections.ld.in
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.api.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.rvfp.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.wdt.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.systimer.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.version.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.libc.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.libc-suboptimal_for_misaligned_mem.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/esp_rom/esp32p4/ld/esp32p4.rom.newlib.ld
+-- Adding linker script C:/Users/Howar/esp-idf-5.5.1/components/soc/esp32p4/ld/esp32p4.peripherals.ld
+-- TANMATSU_COPROCESSOR: 0.7.0
+-- ESP_LCD_EK79007: 1.0.4
+-- ESP_LCD_ST7701: 1.1.5
+-- MIPI_DSI_ABSTRACTION: 0.3.3
+-- ES8156: 0.0.3
+-- ESP_LCD_ILI9341: 2.0.2
+-- MPR121: 0.0.2
+-- BADGE_BSP: 0.9.5
+-- Using Hosted Wi-Fi
+-- Using new driver components (IDF ≥ 5.0)
+-- Component idf::badgeteam__badge-bsp will be linked with -Wl,--whole-archive
+-- Component idf::nicolaielectronics__esp-hosted-tanmatsu will be linked with -Wl,--whole-archive
+-- Components: app_trace app_update badgeteam__badge-bsp badgeteam__custom-certificates bootloader bootloader_support bt cmock console cxx driver efuse emulator_sram_iface esp-tls esp_adc esp_app_format esp_bootloader_format esp_coex esp_common esp_driver_ana_cmpr esp_driver_bitscrambler esp_driver_cam esp_driver_dac esp_driver_gpio esp_driver_gptimer esp_driver_i2c esp_driver_i2s esp_driver_isp esp_driver_jpeg esp_driver_ledc esp_driver_mcpwm esp_driver_parlio esp_driver_pcnt esp_driver_ppa esp_driver_rmt esp_driver_sdio esp_driver_sdm esp_driver_sdmmc esp_driver_sdspi esp_driver_spi esp_driver_touch_sens esp_driver_tsens esp_driver_twai esp_driver_uart esp_driver_usb_serial_jtag esp_eth esp_event esp_gdbstub esp_hid esp_http_client esp_http_server esp_https_ota esp_https_server esp_hw_support esp_lcd esp_local_ctrl esp_mm esp_netif esp_netif_stack esp_partition esp_phy esp_pm esp_psram esp_ringbuf esp_rom esp_security esp_system esp_timer esp_vfs_console esp_wifi espcoredump espressif__cmake_utilities espressif__eppp_link espressif__esp_lcd_ek79007 espressif__esp_lcd_ili9341 espressif__esp_lcd_ili9881c espressif__esp_lcd_lt8912b espressif__esp_lcd_st7701 espressif__esp_serial_slave_link espressif__led_strip espressif__wifi_remote_over_eppp esptool_py fatfs freertos gnuboy hal heap http_parser idf_test ieee802154 json log lwip main matsumonster_ui mbedtls meshtastic_radio monster_core mqtt newlib nicolaielectronics__bmi270 nicolaielectronics__es8156 nicolaielectronics__esp-hosted-tanmatsu nicolaielectronics__esp-wifi-remote-tanmatsu nicolaielectronics__mipi_dsi_abstraction nicolaielectronics__mpr121 nicolaielectronics__ssd1619 nicolaielectronics__tanmatsu-wifi nicolaielectronics__tanmatsu_coprocessor nicolaielectronics__wifi-manager nvs_flash nvs_sec_provider openthread partition_table protobuf-c protocomm pthread riscv robotman2412__pax-gfx rt sdmmc soc spi_flash spiffs tcp_transport ulp unity usb vfs wear_levelling wifi_provisioning wpa_supplicant
+-- Component paths: C:/Users/Howar/esp-idf-5.5.1/components/app_trace C:/Users/Howar/esp-idf-5.5.1/components/app_update C:/Users/Howar/MatsuMonsterMesh/managed_components/badgeteam__badge-bsp C:/Users/Howar/MatsuMonsterMesh/managed_components/badgeteam__custom-certificates C:/Users/Howar/esp-idf-5.5.1/components/bootloader C:/Users/Howar/esp-idf-5.5.1/components/bootloader_support C:/Users/Howar/esp-idf-5.5.1/components/bt C:/Users/Howar/esp-idf-5.5.1/components/cmock C:/Users/Howar/esp-idf-5.5.1/components/console C:/Users/Howar/esp-idf-5.5.1/components/cxx C:/Users/Howar/esp-idf-5.5.1/components/driver C:/Users/Howar/esp-idf-5.5.1/components/efuse C:/Users/Howar/MatsuMonsterMesh/components/emulator_sram_iface C:/Users/Howar/esp-idf-5.5.1/components/esp-tls C:/Users/Howar/esp-idf-5.5.1/components/esp_adc C:/Users/Howar/esp-idf-5.5.1/components/esp_app_format C:/Users/Howar/esp-idf-5.5.1/components/esp_bootloader_format C:/Users/Howar/esp-idf-5.5.1/components/esp_coex C:/Users/Howar/esp-idf-5.5.1/components/esp_common C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_ana_cmpr C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_bitscrambler C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_cam C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_dac C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_gpio C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_gptimer C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_i2c C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_i2s C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_isp C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_jpeg C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_ledc C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_mcpwm C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_parlio C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_pcnt C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_ppa C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_rmt C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_sdio C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_sdm C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_sdmmc C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_sdspi C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_spi C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_touch_sens C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_tsens C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_twai C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_uart C:/Users/Howar/esp-idf-5.5.1/components/esp_driver_usb_serial_jtag C:/Users/Howar/esp-idf-5.5.1/components/esp_eth C:/Users/Howar/esp-idf-5.5.1/components/esp_event C:/Users/Howar/esp-idf-5.5.1/components/esp_gdbstub C:/Users/Howar/esp-idf-5.5.1/components/esp_hid C:/Users/Howar/esp-idf-5.5.1/components/esp_http_client C:/Users/Howar/esp-idf-5.5.1/components/esp_http_server C:/Users/Howar/esp-idf-5.5.1/components/esp_https_ota C:/Users/Howar/esp-idf-5.5.1/components/esp_https_server C:/Users/Howar/esp-idf-5.5.1/components/esp_hw_support C:/Users/Howar/esp-idf-5.5.1/components/esp_lcd C:/Users/Howar/esp-idf-5.5.1/components/esp_local_ctrl C:/Users/Howar/esp-idf-5.5.1/components/esp_mm C:/Users/Howar/esp-idf-5.5.1/components/esp_netif C:/Users/Howar/esp-idf-5.5.1/components/esp_netif_stack C:/Users/Howar/esp-idf-5.5.1/components/esp_partition C:/Users/Howar/esp-idf-5.5.1/components/esp_phy C:/Users/Howar/esp-idf-5.5.1/components/esp_pm C:/Users/Howar/esp-idf-5.5.1/components/esp_psram C:/Users/Howar/esp-idf-5.5.1/components/esp_ringbuf C:/Users/Howar/esp-idf-5.5.1/components/esp_rom C:/Users/Howar/esp-idf-5.5.1/components/esp_security C:/Users/Howar/esp-idf-5.5.1/components/esp_system C:/Users/Howar/esp-idf-5.5.1/components/esp_timer C:/Users/Howar/esp-idf-5.5.1/components/esp_vfs_console C:/Users/Howar/esp-idf-5.5.1/components/esp_wifi C:/Users/Howar/esp-idf-5.5.1/components/espcoredump C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__cmake_utilities C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__eppp_link C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__esp_lcd_ek79007 C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__esp_lcd_ili9341 C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__esp_lcd_ili9881c C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__esp_lcd_lt8912b C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__esp_lcd_st7701 C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__esp_serial_slave_link C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__led_strip C:/Users/Howar/MatsuMonsterMesh/managed_components/espressif__wifi_remote_over_eppp C:/Users/Howar/esp-idf-5.5.1/components/esptool_py C:/Users/Howar/esp-idf-5.5.1/components/fatfs C:/Users/Howar/esp-idf-5.5.1/components/freertos C:/Users/Howar/MatsuMonsterMesh/components/gnuboy C:/Users/Howar/esp-idf-5.5.1/components/hal C:/Users/Howar/esp-idf-5.5.1/components/heap C:/Users/Howar/esp-idf-5.5.1/components/http_parser C:/Users/Howar/esp-idf-5.5.1/components/idf_test C:/Users/Howar/esp-idf-5.5.1/components/ieee802154 C:/Users/Howar/esp-idf-5.5.1/components/json C:/Users/Howar/esp-idf-5.5.1/components/log C:/Users/Howar/esp-idf-5.5.1/components/lwip C:/Users/Howar/MatsuMonsterMesh/main C:/Users/Howar/MatsuMonsterMesh/components/matsumonster_ui C:/Users/Howar/esp-idf-5.5.1/components/mbedtls C:/Users/Howar/MatsuMonsterMesh/components/meshtastic_radio C:/Users/Howar/MatsuMonsterMesh/components/monster_core C:/Users/Howar/esp-idf-5.5.1/components/mqtt C:/Users/Howar/esp-idf-5.5.1/components/newlib C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__bmi270 C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__es8156 C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__esp-hosted-tanmatsu C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__esp-wifi-remote-tanmatsu C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__mipi_dsi_abstraction C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__mpr121 C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__ssd1619 C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__tanmatsu-wifi C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__tanmatsu_coprocessor C:/Users/Howar/MatsuMonsterMesh/managed_components/nicolaielectronics__wifi-manager C:/Users/Howar/esp-idf-5.5.1/components/nvs_flash C:/Users/Howar/esp-idf-5.5.1/components/nvs_sec_provider C:/Users/Howar/esp-idf-5.5.1/components/openthread C:/Users/Howar/esp-idf-5.5.1/components/partition_table C:/Users/Howar/esp-idf-5.5.1/components/protobuf-c C:/Users/Howar/esp-idf-5.5.1/components/protocomm C:/Users/Howar/esp-idf-5.5.1/components/pthread C:/Users/Howar/esp-idf-5.5.1/components/riscv C:/Users/Howar/MatsuMonsterMesh/managed_components/robotman2412__pax-gfx C:/Users/Howar/esp-idf-5.5.1/components/rt C:/Users/Howar/esp-idf-5.5.1/components/sdmmc C:/Users/Howar/esp-idf-5.5.1/components/soc C:/Users/Howar/esp-idf-5.5.1/components/spi_flash C:/Users/Howar/esp-idf-5.5.1/components/spiffs C:/Users/Howar/esp-idf-5.5.1/components/tcp_transport C:/Users/Howar/esp-idf-5.5.1/components/ulp C:/Users/Howar/esp-idf-5.5.1/components/unity C:/Users/Howar/esp-idf-5.5.1/components/usb C:/Users/Howar/esp-idf-5.5.1/components/vfs C:/Users/Howar/esp-idf-5.5.1/components/wear_levelling C:/Users/Howar/esp-idf-5.5.1/components/wifi_provisioning C:/Users/Howar/esp-idf-5.5.1/components/wpa_supplicant
+-- Configuring done (21.3s)
+-- Generating done (1.0s)
+-- Build files have been written to: C:/Users/Howar/MatsuMonsterMesh/build
+[1/11] Performing build step for 'bootloader'
+[1/1] C:\WINDOWS\system32\cmd.exe /C "cd /D C:\Users\Howar\MatsuMonsterMesh\build\bootloader\esp-idf\esptool_py && C:\Espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe C:/Users/Howar/esp-idf-5.5.1/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x2000 C:/Users/Howar/MatsuMonsterMesh/build/bootloader/bootloader.bin"
+Bootloader binary size 0x58b0 bytes. 0x750 bytes (8%) free.
+[2/11] No install step for 'bootloader'
+[3/11] Completed 'bootloader'
+[4/11] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/main.c.obj
+[5/11] Building CXX object esp-idf/main/CMakeFiles/__idf_main.dir/monster_wiring.cpp.obj
+In file included from C:/Users/Howar/MatsuMonsterMesh/components/monster_core/PokemonDaycare.h:10,
+                 from C:/Users/Howar/MatsuMonsterMesh/main/monster_wiring.cpp:14:
+C:/Users/Howar/MatsuMonsterMesh/components/monster_core/DaycareSavPatcher.h: In function 'char gen1CharToAscii(uint8_t)':
+C:/Users/Howar/MatsuMonsterMesh/components/monster_core/DaycareSavPatcher.h:454:24: warning: comparison is always true due to limited range of data type [-Wtype-limits]
+  454 |     if (c >= 0xF6 && c <= 0xFF) return '0' + (c - 0xF6);  // 0-9
+      |                      ~~^~~~~~~
+C:/Users/Howar/MatsuMonsterMesh/components/monster_core/DaycareSavPatcher.h: At global scope:
+C:/Users/Howar/MatsuMonsterMesh/components/monster_core/DaycareSavPatcher.h:466:16: warning: 'uint8_t asciiToGen1Char(char)' defined but not used [-Wunused-function]
+  466 | static uint8_t asciiToGen1Char(char c) {
+      |                ^~~~~~~~~~~~~~~
+[6/11] Linking C static library esp-idf\main\libmain.a
+[7/11] Generating esp-idf/esp_system/ld/sections.ld
+[8/11] Linking CXX executable MatsuMonsterMesh.elf
+FAILED: MatsuMonsterMesh.elf 
+C:\WINDOWS\system32\cmd.exe /C "cd . && C:\Espressif\tools\riscv32-esp-elf\esp-14.2.0_20241119\riscv32-esp-elf\bin\riscv32-esp-elf-g++.exe -march=rv32imafc_zicsr_zifencei_xesppie -mabi=ilp32f -nostartfiles -march=rv32imafc_zicsr_zifencei_xesppie -mabi=ilp32f    -Wl,--cref -Wl,--defsym=IDF_TARGET_ESP32P4=0 -Wl,--Map=C:/Users/Howar/MatsuMonsterMesh/build/MatsuMonsterMesh.map -Wl,--no-warn-rwx-segments -Wl,--orphan-handling=warn -fno-rtti -fno-lto -Wl,--gc-sections -Wl,--warn-common -T rom.api.ld -T esp32p4.peripherals.ld -T esp32p4.rom.ld -T esp32p4.rom.api.ld -T esp32p4.rom.rvfp.ld -T esp32p4.rom.wdt.ld -T esp32p4.rom.systimer.ld -T esp32p4.rom.version.ld -T esp32p4.rom.libc.ld -T esp32p4.rom.libc-suboptimal_for_misaligned_mem.ld -T esp32p4.rom.newlib.ld -T memory.ld -T sections.ld -Wl,--enable-non-contiguous-regions @CMakeFiles\MatsuMonsterMesh.elf.rsp -o MatsuMonsterMesh.elf && cd ."
+C:/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119/riscv32-esp-elf/bin/../lib/gcc/riscv32-esp-elf/14.2.0/../../../../riscv32-esp-elf/bin/ld.exe: esp-idf/main/libmain.a(monster_wiring.cpp.obj): in function `monster_enter_terminal':
+C:/Users/Howar/MatsuMonsterMesh/main/monster_wiring.cpp:108:(.text.monster_enter_terminal+0x24): undefined reference to `audio_mute'
+C:/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119/riscv32-esp-elf/bin/../lib/gcc/riscv32-esp-elf/14.2.0/../../../../riscv32-esp-elf/bin/ld.exe: C:/Users/Howar/MatsuMonsterMesh/main/monster_wiring.cpp:108:(.text.monster_enter_terminal+0x28): undefined reference to `audio_mute'
+C:/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119/riscv32-esp-elf/bin/../lib/gcc/riscv32-esp-elf/14.2.0/../../../../riscv32-esp-elf/bin/ld.exe: esp-idf/main/libmain.a(monster_wiring.cpp.obj): in function `monster_terminal_pump':
+C:/Users/Howar/MatsuMonsterMesh/main/monster_wiring.cpp:128:(.text.monster_terminal_pump+0x62): undefined reference to `audio_mute'
+C:/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119/riscv32-esp-elf/bin/../lib/gcc/riscv32-esp-elf/14.2.0/../../../../riscv32-esp-elf/bin/ld.exe: C:/Users/Howar/MatsuMonsterMesh/main/monster_wiring.cpp:128:(.text.monster_terminal_pump+0x66): undefined reference to `audio_mute'
+C:/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20241119/riscv32-esp-elf/bin/../lib/gcc/riscv32-esp-elf/14.2.0/../../../../riscv32-esp-elf/bin/ld.exe: esp-idf/matsumonster_ui/libmatsumonster_ui.a(MatsuMonsterTerminal.cpp.obj): in function `MatsuMonsterTerminal::render()':
+C:/Users/Howar/MatsuMonsterMesh/components/matsumonster_ui/MatsuMonsterTerminal.cpp:403:(.text._ZN20MatsuMonsterTerminal6renderEv+0x66): undefined reference to `bsp_display_blit(unsigned int, unsigned int, unsigned int, unsigned int, void const*)'
+collect2.exe: error: ld returned 1 exit status
+ninja: build stopped: subcommand failed.

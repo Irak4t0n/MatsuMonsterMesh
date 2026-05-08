@@ -1,0 +1,15 @@
+idf_component_register(
+	SRCS
+		bmi270_sensor_api/bmi2.c
+		bmi270_sensor_api/bmi2_ois.c
+		bmi270_sensor_api/bmi270.c
+		bmi270_sensor_api/bmi270_context.c
+		bmi270_sensor_api/bmi270_legacy.c
+		bmi270_sensor_api/bmi270_maximum_fifo.c
+		bmi270_interface.c
+	INCLUDE_DIRS
+		"."
+		"bmi270_sensor_api"
+	REQUIRES
+		esp_driver_i2c
+)

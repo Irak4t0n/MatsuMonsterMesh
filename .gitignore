@@ -1,0 +1,10 @@
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+_refs_monster_mesh/
+badgelink/
+*.bin
+*.elf
+*.map
