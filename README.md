@@ -19,8 +19,8 @@ The Tanmatsu is an ESP32-P4 + ESP32-C6 handheld with a QWERTY keyboard,
 MIPI-DSI display, SD card, and a LoRa radio that runs Meshtastic firmware.
 This project takes two existing pieces of work and fuses them:
 
-- **HowBoyMatsu** — based on Badge.Team's HowBoyMatsu Game Boy / Game Boy
-  Color emulator for the Tanmatsu, itself derived from
+- **HowBoyMatsu** — Emulator created by myself (Irak4t0n) for the
+  Tanmatsu/Konsool, itself derived from
   [gnuboy](https://github.com/rofl0r/gnuboy)
 - **MonsterMesh** — a Meshtastic module that turns a Game Boy into a mesh
   battle/trade/daycare device, originally built for the LilyGo T-Deck —
@@ -188,9 +188,8 @@ Things that don't work yet:
 
 ## Credits
 
-- **HowBoyMatsu** — based on Badge.Team's HowBoyMatsu Game Boy Color
-  emulator, the base this project is built on. Written for the
-  [Badge.Team](https://github.com/badgeteam) Tanmatsu.
+- **HowBoyMatsu** — Emulator created by myself (Irak4t0n) for the
+  Tanmatsu/Konsool.
 - **MonsterMesh** by [GoatsAndMonkeys](https://github.com/GoatsAndMonkeys/monster_mesh) —
   the Pokémon Gen 1 battle / daycare / mesh-protocol code, ported into
   `components/monster_core/`. GPL-3.0.
