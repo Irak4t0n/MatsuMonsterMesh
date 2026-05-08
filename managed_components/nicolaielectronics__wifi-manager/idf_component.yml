@@ -1,5 +1,0 @@
-repository: git://github.com/Nicolai-Electronics/esp32-component-wifi-manager.git
-repository_info:
-  commit_sha: 98858e0a08120a85e64e2a7659df667239bc248a
-  path: .
-version: 0.3.0

@@ -1,5 +1,0 @@
-repository: git://github.com/badgeteam/esp32-component-custom-certificates.git
-repository_info:
-  commit_sha: cdde00e39fbec6792b7e9254c6a8eec65f36664c
-  path: .
-version: 1.1.0
