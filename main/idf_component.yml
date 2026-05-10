@@ -1,5 +1,6 @@
 dependencies:
   idf: ">=5.5.1"
   badgeteam/badge-bsp: ">=0.9.0"
+  badgeteam/appfs: ">=1.0.1"           # for Alt+M → reboot into Meshtastic UI app
   nicolaielectronics/tanmatsu-wifi: "^1.1.2"
   robotman2412/pax-gfx: "^2.0.6"

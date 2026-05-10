@@ -42,6 +42,12 @@ public:
 
     // Get current state (for UI display)
     const DaycareState &getState() const { return state_; }
+
+    // Trainer identifiers captured at check-in. Used by terminal UI lines
+    // like "Sending out Pikachu from RED's party." Empty string if no
+    // check-in has happened yet.
+    const char *getGameName()  const { return gameName_;  }
+    const char *getShortName() const { return shortName_; }
     bool isActive() const { return active_; }
     uint8_t getNeighborCount() const { return neighborCount_; }
     const DaycareNeighborPokemon *getNeighbors() const { return neighbors_; }
@@ -82,6 +88,27 @@ public:
     // Callback: set this to send a beacon packet
     typedef void (*SendBeaconFunc)(const DaycareBeacon &beacon, void *ctx);
     void setSendBeacon(SendBeaconFunc func, void *ctx) { sendBeacon_ = func; sendBeaconCtx_ = ctx; }
+
+    // Record XP earned outside the daycare's own event loop (e.g. terminal
+    // battles in MatsuMonsterMesh). Caller writes the XP into SRAM directly
+    // — this method only updates the daycare's running counters so things
+    // like cmdStatus and achievement triggers reflect session totals.
+    //   partyIdx  : party slot of the Pokémon that earned the XP (0..partyCount-1)
+    //   xpGained  : amount of XP gained
+    //   newLevel  : level after applying the XP (0 = unknown, just track XP)
+    void recordBattleWin(uint8_t partyIdx, uint32_t xpGained, uint8_t newLevel) {
+        if (!active_)                       return;
+        if (partyIdx >= state_.partyCount)  return;
+        auto &p = state_.pokemon[partyIdx];
+        p.totalXpGained += xpGained;
+        if (newLevel > 0) {
+            uint8_t prev = p.savLevel + (uint8_t)p.totalLevelsGained;
+            if (newLevel > prev) {
+                p.totalLevelsGained += (uint16_t)(newLevel - prev);
+            }
+        }
+        state_.lastEventMs = mm_millis();
+    }
 
 private:
     DaycareState state_ = {};

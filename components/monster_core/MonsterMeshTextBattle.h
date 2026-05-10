@@ -90,6 +90,16 @@ public:
     bool dirty() const { return dirty_; }
     void clearDirty() { dirty_ = false; }
 
+    // Direct push hook: registered by the terminal so each appendLog() also
+    // forwards immediately to the terminal scrollback. Without this, the
+    // scroll-throttle/poll-the-newest-line strategy drops intermediate
+    // turn lines (only the most-recent line ever became "newest visible").
+    using ExtLogCb = void (*)(const char *line, void *ctx);
+    void setExternalLogCallback(ExtLogCb cb, void *ctx) {
+        ext_log_cb_  = cb;
+        ext_log_ctx_ = ctx;
+    }
+
 private:
     MeshtasticRadio    *radio_ = nullptr;
     Gen1BattleEngine    engine_;
@@ -116,6 +126,10 @@ private:
     uint8_t  scrollPending_ = 0; // lines queued but not yet shown
 
     bool dirty_ = true;
+
+    // External log forwarding (registered by MatsuMonsterTerminal).
+    ExtLogCb ext_log_cb_  = nullptr;
+    void    *ext_log_ctx_ = nullptr;
 
     // Timeouts
     uint32_t lastRecvMs_ = 0;

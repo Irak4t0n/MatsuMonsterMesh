@@ -18,6 +18,7 @@ idf_component_register(
 		bt
 		badge-bsp
 		tanmatsu-wifi
+                appfs
         gnuboy
         # MatsuMonsterMesh additions — Step 6 will wire these into main.c.
         # Listed here so they compile during build even before they're called.

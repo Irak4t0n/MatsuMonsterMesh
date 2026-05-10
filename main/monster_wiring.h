@@ -35,6 +35,14 @@ void monster_init(pax_buf_t *fb, int canvas_w, int canvas_h, QueueHandle_t input
 // after sram_load() returns.
 void monster_init_sram(void);
 
+// Auto check-in to the MonsterMesh daycare using the live ROM's save data.
+// Reads the trainer name from Gen 1 SRAM offset 0x2598 and feeds the whole
+// party to daycare.checkIn(). Must be called AFTER monster_init_sram().
+// shortName is the 4-char Meshtastic-style local node name; until the C6
+// radio is wired this is hardcoded by the caller (e.g. "MM01").
+// No-op if SRAM is not bound or the ROM has no battery RAM.
+void monster_auto_checkin(const char *shortName);
+
 // Periodic call from the emulator frame loop. Internally rate-limits to
 // PokemonDaycare's expected ~10s cadence — cheap to call every frame.
 void monster_daycare_tick(void);

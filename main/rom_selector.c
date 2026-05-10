@@ -188,12 +188,15 @@ void scan_roms(void) {
     while ((entry = readdir(dir)) != NULL && rom_count < MAX_ROMS) {
         char *name = entry->d_name;
         int len = strlen(name);
-        if (len > 4) {
-            char *ext = name + len - 4;
-            if (strcasecmp(ext, ".gbc") == 0 || strcasecmp(ext, ".gb") == 0) {
-                snprintf(rom_list[rom_count], sizeof(rom_list[0]), "%s/%s", ROMS_DIR, name);
-                rom_count++;
-            }
+        // .gbc is 4 chars, .gb is 3 chars — check each at the correct offset.
+        // Previous version sliced the last 4 chars and compared to both,
+        // which silently dropped every .gb (DMG) file because the slice
+        // included the character BEFORE the dot.
+        bool is_gbc = (len > 4) && strcasecmp(name + len - 4, ".gbc") == 0;
+        bool is_gb  = (len > 3) && strcasecmp(name + len - 3, ".gb")  == 0;
+        if (is_gbc || is_gb) {
+            snprintf(rom_list[rom_count], sizeof(rom_list[0]), "%s/%s", ROMS_DIR, name);
+            rom_count++;
         }
     }
     closedir(dir);

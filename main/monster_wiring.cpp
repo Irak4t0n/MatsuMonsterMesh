@@ -16,6 +16,7 @@
 #include "MatsuMonsterTerminal.h"
 #include "emulator_sram_iface.h"
 #include "gnuboy_sram.h"
+#include "DaycareSavPatcher.h"   // gen1CharToAscii + SAV_* constants
 
 static const char *TAG = "MMWire";
 
@@ -23,6 +24,17 @@ static const char *TAG = "MMWire";
 // pause emulator audio + display while the terminal owns the screen.
 extern "C" volatile int  audio_mute;
 extern "C" TaskHandle_t  blit_task_handle;
+
+// I2S channel pause/resume helpers defined in main.c — needed so the audio
+// hardware stops cleanly on terminal entry instead of looping the last
+// DMA-loaded sample.
+extern "C" void mm_audio_pause(void);
+extern "C" void mm_audio_resume(void);
+
+// Checkpoint helper: writes ram.sbank to /sdcard/saves/<rom>.sav. Called on
+// terminal entry so any in-game Save done since the last Backspace is
+// persisted before a reboot / badgelink relaunch can lose it.
+extern "C" void mm_sram_persist(void);
 
 // ── Static storage for the C++ subsystem ────────────────────────────────────
 
@@ -86,6 +98,41 @@ extern "C" void monster_init_sram(void)
              (unsigned)iemu_sram_size(&s_sram));
 }
 
+extern "C" void monster_auto_checkin(const char *shortName)
+{
+    // Direct port of upstream MonsterMeshModule::daycareAutoCheckIn() —
+    // see _refs_monster_mesh/.../MonsterMeshModule.cpp:2399.
+    if (!s_inited || !s_sram_ok) {
+        ESP_LOGW(TAG, "auto-checkin: wiring not ready");
+        return;
+    }
+    const uint8_t *sram = iemu_sram_data(&s_sram);
+    size_t         sram_sz = iemu_sram_size(&s_sram);
+    // Need at least 0x2598 + 7 bytes to read the trainer name, plus the
+    // full SAV layout for daycare.checkIn() to read the party safely.
+    if (!sram || sram_sz < (size_t)SAV_CHECKSUM_OFFSET + 1) {
+        ESP_LOGW(TAG, "auto-checkin: SRAM unavailable or too small (size=%u)",
+                 (unsigned)sram_sz);
+        return;
+    }
+
+    // Decode trainer name from Gen 1 player-name offset (0x2598, 7 bytes,
+    // Gen 1 charset, 0x50 terminator).
+    char gameName[8] = {};
+    for (int i = 0; i < 7; ++i) {
+        uint8_t c = sram[0x2598 + i];
+        if (c == 0x50) break;
+        gameName[i] = gen1CharToAscii(c);
+    }
+
+    const char *sn = shortName ? shortName : "MM01";
+    s_daycare.checkIn(sram, sn, gameName);
+
+    const auto &state = s_daycare.getState();
+    ESP_LOGI(TAG, "auto-checkin: trainer='%s' shortName='%s' party=%u",
+             gameName, sn, (unsigned)state.partyCount);
+}
+
 extern "C" void monster_daycare_tick(void)
 {
     if (!s_inited) return;
@@ -104,10 +151,15 @@ extern "C" monster_state_t monster_get_state(void)
 extern "C" void monster_enter_terminal(void)
 {
     if (!s_inited || s_state == MONSTER_STATE_TERMINAL) return;
+    // Checkpoint any in-game Save the player did since the last Backspace —
+    // otherwise a reboot / app-relaunch from inside the terminal loses it.
+    mm_sram_persist();
     s_state = MONSTER_STATE_TERMINAL;
     audio_mute = 1;
+    mm_audio_pause();   // stop the I2S DMA so it doesn't loop the last sample
     if (s_terminal) {
-        s_terminal->clearExitFlag();   // ignore stale exit from previous session
+        s_terminal->clearExitFlag();    // ignore stale exit from previous session
+        s_terminal->prepareForReentry();// bail out of stale mid-battle state
         // Re-print the banner so the user knows they're in the terminal.
         s_terminal->println("");
         s_terminal->println("=== Entered terminal (Fn+T or ESC to exit) ===");
@@ -126,6 +178,7 @@ extern "C" bool monster_terminal_pump(void)
     if (s_terminal->wantsToExit()) {
         s_terminal->clearExitFlag();
         s_state    = MONSTER_STATE_EMULATOR;
+        mm_audio_resume();   // I2S DMA back online before unmuting
         audio_mute = 0;
         ESP_LOGI(TAG, "state -> EMULATOR");
         return true;

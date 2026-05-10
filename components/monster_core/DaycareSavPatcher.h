@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "emulator_sram_iface.h"
+#include "PokemonData.h"   // for Gen1Party / Gen1Pokemon (used by buildGen1Party)
 
 // ── SRAM layout constants ──────────────────────────────────────────────────
 
@@ -28,6 +29,29 @@ static constexpr uint16_t SAV_CHECKSUM_END       = 0x3522;
 static constexpr uint8_t  SAV_POKEMON_SIZE       = 44;      // party pokemon struct
 static constexpr uint8_t  SAV_NAME_SIZE          = 11;
 static constexpr uint8_t  SAV_STRING_TERMINATOR  = 0x50;
+
+// ── Trainer + box-system constants (Gen 1 R/B) ─────────────────────────────
+// Player's 2-byte trainer ID (wPlayerID mirror) — used as the OT ID on
+// freshly caught Pokémon so they don't trade-evolve incorrectly.
+static constexpr uint16_t SAV_TRAINER_ID         = 0x2605;
+
+// "Current box" mirror in bank 1. The game keeps the active PC box's full
+// 1122-byte record here at all times; switching boxes via Bill's PC swaps
+// the contents in/out of the per-box slots in banks 2/3 (0x4000+/0x6000+).
+// Writing here is enough to make a caught mon visible the next time the
+// player opens the PC on the currently-selected box (which is what the
+// in-game catch flow does on a full party — exactly the behaviour we
+// want for `catch` in the terminal).
+static constexpr uint16_t SAV_CURRENT_BOX        = 0x30C0;
+static constexpr uint16_t SAV_BOX_SIZE           = 0x462;   // 1122 bytes
+static constexpr uint8_t  SAV_BOX_CAPACITY       = 20;
+static constexpr uint8_t  SAV_BOX_POKE_SIZE      = 33;      // box record (no level/maxStats)
+// Sub-region offsets relative to the start of a box (mirror or bank slot).
+static constexpr uint16_t BOX_COUNT_OFF          = 0x000;   // 1 byte
+static constexpr uint16_t BOX_SPECIES_OFF        = 0x001;   // 20 + 0xFF terminator
+static constexpr uint16_t BOX_POKE_OFF           = 0x016;   // 20 × 33
+static constexpr uint16_t BOX_OT_OFF             = 0x2AA;   // 20 × 11
+static constexpr uint16_t BOX_NICK_OFF           = 0x386;   // 20 × 11
 
 // ── Offsets within the 44-byte Pokemon struct ──────────────────────────────
 
@@ -682,6 +706,143 @@ public:
         sram[SAV_CHECKSUM_OFFSET] = ~sum;
     }
 
+    // ── Caught-Pokémon insertion ───────────────────────────────────────
+    // Description of a freshly-caught wild, captured in the terminal's
+    // catch flow. Caller fills in everything from the live BattlePoke;
+    // this struct intentionally mirrors that data so the patcher doesn't
+    // need to depend on the battle engine headers.
+    struct CaughtMon {
+        uint8_t  dexNum;          // Pokédex number (1..151)
+        uint8_t  level;           // 1..100
+        uint16_t hp, maxHp;       // current and max HP at catch time
+        uint16_t atk, def, spd, spc;
+        uint8_t  type1, type2;    // type indices (Gen 1 numbering)
+        uint8_t  moves[4];
+        uint8_t  pp[4];
+        uint8_t  dvs[2];          // packed DV pair (matches PKM_DVS layout)
+        char     nickname[11];    // ASCII; encoded to Gen 1 charset on write
+    };
+
+    // Returns:
+    //   0  → added to party
+    //   1  → added to current PC box (party was full)
+    //  -1  → no room (party AND current PC box both full)
+    //  -2  → SRAM unavailable / invalid CaughtMon
+    //
+    // Caller must fixChecksum() afterwards (skipped here so multiple writes
+    // can be batched). Mirrors the in-game behaviour: full party diverts to
+    // whichever box is currently selected in Bill's PC.
+    static int addCaughtMon(uint8_t *sram, const CaughtMon &mon) {
+        if (!sram) return -2;
+        if (mon.dexNum == 0 || mon.dexNum > 151) return -2;
+
+        const uint8_t internalIdx = dexToInternal[mon.dexNum];
+
+        // Pull the player's identity off the save so the new mon's OT
+        // matches their existing party (otherwise the game treats it as a
+        // traded Pokémon — disobedient at high levels, etc.).
+        uint16_t trainer_id = readBE16(&sram[SAV_TRAINER_ID]);
+        if (trainer_id == 0 || trainer_id == 0xFFFF) trainer_id = 0xC0DE;
+
+        uint8_t trainer_name[SAV_NAME_SIZE] = {};
+        memcpy(trainer_name, &sram[SAV_CHECKSUM_START], SAV_NAME_SIZE);
+        // Player name is stored Gen-1-encoded with a 0x50 terminator. If the
+        // SAV is uninitialised guarantee a terminator so the game doesn't
+        // chase past the buffer when rendering OT in PC summaries.
+        bool terminated = false;
+        for (int j = 0; j < SAV_NAME_SIZE; ++j) {
+            if (trainer_name[j] == SAV_STRING_TERMINATOR) { terminated = true; break; }
+        }
+        if (!terminated) trainer_name[SAV_NAME_SIZE - 1] = SAV_STRING_TERMINATOR;
+
+        const uint32_t totalExp = expForLevel(mon.dexNum, mon.level);
+
+        uint8_t party_count = sram[SAV_PARTY_COUNT];
+
+        // ── Party path (count < 6) ────────────────────────────────────
+        if (party_count < 6) {
+            const uint8_t i = party_count;
+            sram[SAV_PARTY_COUNT] = party_count + 1;
+
+            // Species list is `count` species followed by 0xFF terminator.
+            // Insert at slot i, push terminator to slot i+1.
+            sram[SAV_SPECIES_LIST + i]     = internalIdx;
+            sram[SAV_SPECIES_LIST + i + 1] = 0xFF;
+
+            uint8_t *pkm = &sram[SAV_POKEMON_DATA + i * SAV_POKEMON_SIZE];
+            memset(pkm, 0, SAV_POKEMON_SIZE);
+            pkm[PKM_SPECIES]     = internalIdx;
+            writeBE16(&pkm[PKM_CURRENT_HP], mon.hp ? mon.hp : mon.maxHp);
+            pkm[PKM_LEVEL_PC]    = mon.level;
+            pkm[PKM_STATUS]      = 0;
+            pkm[PKM_TYPE1]       = mon.type1;
+            pkm[PKM_TYPE2]       = mon.type2;
+            pkm[7]               = 45;        // catchRate fallback (unused post-catch)
+            memcpy(&pkm[8], mon.moves, 4);
+            writeBE16(&pkm[12], trainer_id);  // otId
+            writeBE24(&pkm[PKM_EXP], totalExp);
+            // EVs left zero (default for fresh wild captures).
+            pkm[PKM_DVS]         = mon.dvs[0];
+            pkm[PKM_DVS + 1]     = mon.dvs[1];
+            memcpy(&pkm[29], mon.pp, 4);
+            pkm[PKM_LEVEL_PARTY] = mon.level;
+            writeBE16(&pkm[PKM_MAX_HP],  mon.maxHp);
+            writeBE16(&pkm[PKM_ATTACK],  mon.atk);
+            writeBE16(&pkm[PKM_DEFENSE], mon.def);
+            writeBE16(&pkm[PKM_SPEED],   mon.spd);
+            writeBE16(&pkm[PKM_SPECIAL], mon.spc);
+
+            memcpy(&sram[SAV_OT_NAMES + i * SAV_NAME_SIZE], trainer_name, SAV_NAME_SIZE);
+            writeNickname(&sram[SAV_NICKNAMES + i * SAV_NAME_SIZE], mon.nickname);
+            return 0;
+        }
+
+        // ── Current-box path (party full) ─────────────────────────────
+        const uint16_t box = SAV_CURRENT_BOX;
+        uint8_t box_count = sram[box + BOX_COUNT_OFF];
+        if (box_count > SAV_BOX_CAPACITY) box_count = 0;   // garbage → reset
+        if (box_count >= SAV_BOX_CAPACITY) return -1;
+
+        const uint8_t i = box_count;
+        sram[box + BOX_COUNT_OFF]              = box_count + 1;
+        sram[box + BOX_SPECIES_OFF + i]        = internalIdx;
+        sram[box + BOX_SPECIES_OFF + i + 1]    = 0xFF;     // re-terminate
+
+        uint8_t *bm = &sram[box + BOX_POKE_OFF + i * SAV_BOX_POKE_SIZE];
+        memset(bm, 0, SAV_BOX_POKE_SIZE);
+        // Box format = first 33 bytes of the party format. Same field
+        // offsets (PKM_SPECIES through PKM_DVS / PP) apply.
+        bm[PKM_SPECIES]     = internalIdx;
+        writeBE16(&bm[PKM_CURRENT_HP], mon.hp ? mon.hp : mon.maxHp);
+        bm[PKM_LEVEL_PC]    = mon.level;
+        bm[PKM_STATUS]      = 0;
+        bm[PKM_TYPE1]       = mon.type1;
+        bm[PKM_TYPE2]       = mon.type2;
+        bm[7]               = 45;
+        memcpy(&bm[8], mon.moves, 4);
+        writeBE16(&bm[12], trainer_id);
+        writeBE24(&bm[PKM_EXP], totalExp);
+        bm[PKM_DVS]         = mon.dvs[0];
+        bm[PKM_DVS + 1]     = mon.dvs[1];
+        memcpy(&bm[29], mon.pp, 4);
+
+        memcpy(&sram[box + BOX_OT_OFF   + i * SAV_NAME_SIZE], trainer_name, SAV_NAME_SIZE);
+        writeNickname(&sram[box + BOX_NICK_OFF + i * SAV_NAME_SIZE], mon.nickname);
+        return 1;
+    }
+
+    // IEmulatorSRAM overload — flat-buffer backends only (matches the rest
+    // of this class).
+    static int addCaughtMon(IEmulatorSRAM *sram, const CaughtMon &mon) {
+        if (!sram) return -2;
+        if (iemu_sram_size(sram) < SAV_MIN_BYTES) return -2;
+        uint8_t *buf = iemu_sram_data(sram);
+        if (!buf) return -2;
+        int r = addCaughtMon(buf, mon);
+        if (r >= 0) iemu_sram_mark_dirty(sram);
+        return r;
+    }
+
     // ── Full checkout: patch all party Pokemon and fix checksum ─────────
     // xpGained: array of XP gained per party slot
     // dexNums: array of Pokedex numbers per party slot
@@ -729,7 +890,57 @@ public:
         return ok;
     }
 
+    // ── Build a full Gen1Party from a flat SRAM buffer ─────────────────
+    // Ported verbatim from upstream MonsterMeshModule::buildTerminalPartyFromSram
+    // (_refs_monster_mesh/.../MonsterMeshModule.cpp:2598). Upstream cached
+    // this once at boot and reused it for every battle / lobby challenge.
+    // Returns party count (0..6); 0 means SRAM unavailable or empty party.
+    static uint8_t buildGen1Party(const uint8_t *sram, Gen1Party *out) {
+        if (!sram || !out) return 0;
+        memset(out, 0, sizeof(*out));
+        uint8_t count = sram[SAV_PARTY_COUNT];
+        if (count > 6) count = 6;
+        out->count = count;
+        memcpy(out->species, &sram[SAV_SPECIES_LIST], 7);
+        memcpy(out->mons,    &sram[SAV_POKEMON_DATA], count * sizeof(Gen1Pokemon));
+        for (uint8_t i = 0; i < count; ++i) {
+            const uint8_t *nickRaw = &sram[SAV_NICKNAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; ++j) {
+                if (nickRaw[j] == SAV_STRING_TERMINATOR) {
+                    out->nicknames[i][j] = 0;
+                    break;
+                }
+                out->nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
+                if (j == 9) out->nicknames[i][10] = 0;
+            }
+        }
+        return count;
+    }
+
+    static uint8_t buildGen1Party(const IEmulatorSRAM *sram, Gen1Party *out) {
+        if (!sram || !out) return 0;
+        if (iemu_sram_size(sram) < SAV_MIN_BYTES) return 0;
+        const uint8_t *buf = iemu_sram_data(sram);
+        if (!buf) return 0;
+        return buildGen1Party(buf, out);
+    }
+
 private:
+    // ── Encode an ASCII nickname (up to 10 chars) into Gen 1 charset ───
+    // Always writes a full 11-byte buffer: encoded chars followed by a
+    // 0x50 terminator and 0x50 padding for any unused slots. Used by the
+    // catch flow to populate party + box nickname rows.
+    static void writeNickname(uint8_t *dst, const char *ascii) {
+        // Pre-fill with the terminator so trailing bytes are clean.
+        memset(dst, SAV_STRING_TERMINATOR, SAV_NAME_SIZE);
+        if (!ascii) return;
+        int j = 0;
+        for (; j < 10 && ascii[j]; ++j) {
+            dst[j] = asciiToGen1Char(ascii[j]);
+        }
+        dst[j] = SAV_STRING_TERMINATOR;
+    }
+
     // ── Recalculate all 5 stats for a party Pokemon ────────────────────
     static void recalcStats(uint8_t *pkm, uint8_t dexNum, uint8_t level) {
         if (dexNum == 0 || dexNum > 151) return;

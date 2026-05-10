@@ -4,6 +4,7 @@
 #include "bsp/device.h"
 #include "bootloader_common.h"
 #include "esp_system.h"
+#include "appfs.h"             // appfsOpen / appfsBootSelect / appfsNextEntry
 #include "bsp/display.h"
 #include "bsp/audio.h"
 #include "driver/i2s_std.h"
@@ -143,12 +144,90 @@ void rewind_push(void);
 void rewind_release_all_keys(void);
 int  rewind_pop(void);
 
+// Forward decls — definitions further down. Needed because Alt+M's helper
+// (defined below) calls these before their bodies appear.
+void mm_sram_persist(void);
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 void restart_to_launcher(void) {
     rtc_retain_mem_t *mem = bootloader_common_get_rtc_retain_mem();
     memset(mem->custom, 0, sizeof(mem->custom));
     esp_restart();
+}
+
+// ── Alt+M → reboot directly into the Tanmatsu Meshtastic UI app ─────────────
+// The badge.team launcher reads the AppFS bootsel from RTC RAM at the next
+// boot and starts the selected app instead of itself. We use that mechanism
+// to swap directly to Nicolai-Electronics' tanmatsu-meshtastic-ui without
+// the user having to step through the launcher list.
+//
+// AppFS slugs are chosen at install time (BadgeLink upload command), so
+// there's no canonical value. We probe the most likely slugs first, then
+// fall back to a title scan that catches whatever name the user picked.
+static appfs_handle_t mm_find_meshtastic_app(void) {
+    static const char * const kSlugs[] = {
+        "meshtastic",
+        "meshtastic-ui",
+        "tanmatsu-meshtastic-ui",
+        "tanmatsu-meshtastic",
+        "meshtastic_ui",
+        NULL
+    };
+    for (int i = 0; kSlugs[i]; ++i) {
+        appfs_handle_t fd = appfsOpen(kSlugs[i]);
+        if (fd != APPFS_INVALID_FD) return fd;
+    }
+    // Title scan — walks every installed app, matches case-insensitively
+    // on "mesh" in either the AppFS filename (slug) or human title.
+    appfs_handle_t fd = appfsNextEntry(APPFS_INVALID_FD);
+    while (fd != APPFS_INVALID_FD) {
+        const char *name  = NULL;
+        const char *title = NULL;
+        appfsEntryInfoExt(fd, &name, &title, NULL, NULL);
+        const char *fields[2] = { name, title };
+        for (int k = 0; k < 2; ++k) {
+            const char *s = fields[k];
+            if (!s) continue;
+            // tiny case-insensitive substring search for "mesh"
+            for (const char *p = s; *p; ++p) {
+                if ((p[0] == 'm' || p[0] == 'M') &&
+                    (p[1] == 'e' || p[1] == 'E') &&
+                    (p[2] == 's' || p[2] == 'S') &&
+                    (p[3] == 'h' || p[3] == 'H')) {
+                    return fd;
+                }
+            }
+        }
+        fd = appfsNextEntry(fd);
+    }
+    return APPFS_INVALID_FD;
+}
+
+// Returns true if it kicked off a reboot (caller should bail out of any
+// loops it's in — esp_restart() will fire a few ms later via vTaskDelay).
+// Returns false if no Meshtastic app is installed; caller can show a hint.
+bool restart_to_meshtastic(void) {
+    // Persist the current SAV first so any in-game progress carries over
+    // after the user comes back. Same checkpoint that Fn+T uses on entry.
+    mm_sram_persist();
+
+    appfs_handle_t fd = mm_find_meshtastic_app();
+    if (fd == APPFS_INVALID_FD) {
+        ESP_LOGW(TAG, "Alt+M: no Meshtastic UI app found in AppFS — "
+                      "install Nicolai-Electronics/tanmatsu-meshtastic-ui "
+                      "via BadgeLink first.");
+        return false;
+    }
+    if (!appfsBootSelect(fd, 0)) {
+        ESP_LOGE(TAG, "Alt+M: appfsBootSelect failed for Meshtastic UI");
+        return false;
+    }
+    // Tiny grace period so any host-side responder (badgelink) finishes
+    // its reply on the wire before the chip resets.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+    return true;   // unreachable
 }
 
 void blit(void) {
@@ -521,6 +600,38 @@ int pcm_submit(void) {
     return 1;
 }
 
+// Persist the live SRAM (ram.sbank) to /sdcard/saves/<rom>.sav. Called from
+// monster_wiring.cpp on terminal entry so any in-game `Save` the player
+// did since the last Backspace / autosave is checkpointed before the
+// terminal takes over and a future reboot / relaunch can't lose it.
+void mm_sram_persist(void) {
+    if (!sram_path_global[0]) return;
+    FILE *sf = fopen(sram_path_global, "wb");
+    if (sf) { sram_save(sf); fclose(sf); ESP_LOGI(TAG, "SRAM persisted (terminal entry)"); }
+}
+
+// Pause / resume the I2S channel for the MonsterMesh terminal handoff.
+// Called from monster_wiring.cpp via the C ABI when entering / leaving the
+// terminal state. Without this, audio_mute=1 stops gnuboy from feeding the
+// DMA buffer but the I2S hardware keeps cycling whatever was last loaded —
+// audible as a stuck loop / drone. Disabling the channel halts the DMA
+// cleanly; re-enabling on exit lets gnuboy resume normally.
+void mm_audio_pause(void) {
+    if (i2s_enabled) {
+        i2s_chan_handle_t h = NULL;
+        bsp_audio_get_i2s_handle(&h);
+        if (h) { i2s_channel_disable(h); i2s_enabled = 0; }
+    }
+}
+
+void mm_audio_resume(void) {
+    if (!i2s_enabled) {
+        i2s_chan_handle_t h = NULL;
+        bsp_audio_get_i2s_handle(&h);
+        if (h) { i2s_channel_enable(h); i2s_enabled = 1; }
+    }
+}
+
 void pcm_close(void) {
     if (pcm.buf) free(pcm.buf);
 }
@@ -556,15 +667,23 @@ void doevents(void) {
 
     // ── Terminal state bypass ─────────────────────────────────────────────
     // While the MonsterMesh terminal is active we hand the input queue and
-    // the screen over to it; gnuboy keeps cycling internally but we don't
-    // dispatch its inputs and blit_task will skip the GBC blit (see below).
+    // the screen over to it. Spin here inside ev_poll until the user exits
+    // the terminal — this halts the gnuboy emulator core entirely (no CPU
+    // emulation, no GBC raster, no audio) for the whole terminal session,
+    // instead of letting it spin in the background and starve the terminal
+    // for memory bus bandwidth.
     if (monster_get_state() == MONSTER_STATE_TERMINAL) {
         // Release any held gamepad keys so they don't latch on resume.
         for (int i = 0; i < 8; i++) {
             pad_set(key_pads[i], 0);
             if (i < 4) key_release_time[i] = 0;
         }
-        monster_terminal_pump();
+        // monster_terminal_pump() returns true on the frame the user exits
+        // the terminal back to emulator state; vTaskDelay yields the CPU
+        // so blit_task / audio_task / ss_io can still get scheduled.
+        while (!monster_terminal_pump()) {
+            vTaskDelay(pdMS_TO_TICKS(16));
+        }
         return;
     }
 
@@ -817,6 +936,17 @@ void doevents(void) {
             if ((event.args_keyboard.modifiers & BSP_INPUT_MODIFIER_FUNCTION) &&
                 (event.args_keyboard.ascii == 't' || event.args_keyboard.ascii == 'T')) {
                 monster_enter_terminal();
+                continue;
+            }
+            // Alt+M → reboot into the Tanmatsu Meshtastic UI app.
+            // Same idea as F1 → launcher, except we set the AppFS bootsel
+            // to the Meshtastic app instead of clearing it. If the user
+            // hasn't installed that app yet we just log a warning and
+            // keep going.
+            if ((event.args_keyboard.modifiers & BSP_INPUT_MODIFIER_ALT) &&
+                (event.args_keyboard.ascii == 'm' || event.args_keyboard.ascii == 'M')) {
+                if (restart_to_meshtastic()) continue;   // unreachable on success
+                ESP_LOGW(TAG, "Alt+M ignored: Meshtastic UI app not found");
                 continue;
             }
             // Backtick toggles FPS regardless of menu state
@@ -1121,6 +1251,13 @@ void emulator_task(void *arg) {
     // is the earliest safe point to wire it up.
     monster_init_sram();
 
+    // Auto check-in to the MonsterMesh daycare with the live save's party.
+    // Mirrors upstream MonsterMeshModule's pendingAutoCheckin_ flow — the
+    // Gen 1 SAV layout is already in ram.sbank at this point. shortName is
+    // hardcoded for now; when the real radio transport (PORTING_NOTES.md
+    // item 1) lands it should come from the C6 Meshtastic node short name.
+    monster_auto_checkin("MM01");
+
     pax_background(&fb_pax, 0xFF000000);
     blit();
 
@@ -1227,7 +1364,10 @@ void app_main(void) {
     // Bring up the MonsterMesh side: radio, daycare, battle engine, terminal.
     // SRAM binding is deferred to monster_init_sram() (called after gnuboy's
     // loader allocates ram.sbank — see emulator_task below).
-    monster_init(&fb_pax, (int)display_h_res, (int)display_v_res, input_event_queue);
+    // Pass POST-rotation dimensions (panel is native 480x800 portrait, but
+    // pax_buf_set_orientation(PAX_O_ROT_CW) gives draw code an 800x480
+    // landscape user-coord space). Terminal draws in that rotated space.
+    monster_init(&fb_pax, (int)display_v_res, (int)display_h_res, input_event_queue);
 
     pax_background(&fb_pax, 0xFF000000);
     pax_draw_text(&fb_pax, 0xFFFF0000, pax_font_sky_mono, 24, 10, 10,  "HowBoyMatsu");

@@ -23,6 +23,10 @@ void MonsterMeshTextBattle::appendLog(const char *line)
     if (logFill_ < LOG_LINES) logFill_++;
     scrollPending_++;
     dirty_ = true;
+    // Push immediately to whoever's listening (the terminal's scrollback).
+    // Without this hook the caller has to poll visibleLogLines() — and that
+    // path silently drops every intermediate line of a multi-line turn.
+    if (ext_log_cb_) ext_log_cb_(line, ext_log_ctx_);
 }
 
 uint8_t MonsterMeshTextBattle::visibleLogLines(char out[][LOG_WIDTH + 1], uint8_t maxLines) const
@@ -238,6 +242,29 @@ void MonsterMeshTextBattle::resolveTurn()
 {
     engine_.executeTurn(engineLogCb, this);
     handleFaints();
+
+    // Damage emission: the engine applies HP changes silently (upstream
+    // rendered HP bars on screen). Without those, every neutral non-crit hit
+    // looks like nothing happened — even though the CPU did move and damage
+    // was dealt. Print a per-turn HP line so the user can see turn outcomes.
+    {
+        const auto &p0 = engine_.party(0);
+        const auto &p1 = engine_.party(1);
+        const auto &m0 = p0.mons[p0.active];
+        const auto &m1 = p1.mons[p1.active];
+        // Bigger than LOG_WIDTH because gcc's format-truncation analyzer
+        // sums worst-case widths (uint16 = up to 5 digits each, etc.).
+        // appendLog will truncate to its own LOG_WIDTH for storage.
+        char buf[96];
+        snprintf(buf, sizeof(buf),
+                 "HP: %.7s %u/%u  vs  %.7s %u/%u",
+                 m0.nickname[0] ? m0.nickname : "you",
+                 (unsigned)m0.hp, (unsigned)m0.maxHp,
+                 m1.nickname[0] ? m1.nickname : "foe",
+                 (unsigned)m1.hp, (unsigned)m1.maxHp);
+        appendLog(buf);
+    }
+
     if (engine_.result() != Gen1BattleEngine::Result::ONGOING) {
         switch (engine_.result()) {
             case Gen1BattleEngine::Result::P1_WIN: appendLog("You won!");      break;
@@ -364,7 +391,10 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
     if (c >= '1' && c <= '4') {
         uint8_t slot = c - '1';
         const auto &mon = engine_.party(0).mons[engine_.party(0).active];
-        if (mon.moves[slot] == 0 || mon.pp[slot] == 0) return;
+        // Visible feedback for silent failures so the user can tell why
+        // 1-4 didn't do anything (originally upstream just `return;`'d).
+        if (mon.moves[slot] == 0) { appendLog("No move there!");        return; }
+        if (mon.pp[slot] == 0)    { appendLog("Out of PP for that move!"); return; }
         engine_.submitAction(0, 0 /*USE_MOVE*/, slot);
         if (mode_ == Mode::NETWORKED) sendAction(0, slot);
         phase_ = Phase::WAIT_REMOTE;
