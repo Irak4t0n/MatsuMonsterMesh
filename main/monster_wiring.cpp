@@ -71,20 +71,10 @@ static inline uint32_t now_ms() {
 static void daycare_send_beacon_cb(const DaycareBeacon &beacon, void *ctx)
 {
     (void)ctx;
-    // The C6 radio coprocessor times out on TX for packets > ~80 bytes
-    // on-air at SF11/BW250. A full 6-pokemon DaycareBeacon is ~142 bytes
-    // on-air — way over.  Cap to 1 pokemon so the on-air size stays under
-    // 60 bytes (19 header + 17 per pokemon + 16 Meshtastic + ~5 protobuf
-    // = ~57 on-air). This keeps T-Deck compatibility (type 0x60) while
-    // fitting within the C6's TX-complete timeout budget.  The lead
-    // pokemon is the most important for daycare interactions anyway.
     DaycareBeacon b = beacon;
     b.nodeId = meshtastic_proto_node_id();
-    // Cap to 1 pokemon to stay under the C6's ~80 byte TX ceiling.
-    uint8_t count = b.partyCount > 1 ? 1 : b.partyCount;
-    b.partyCount  = count;
-    size_t  len   = offsetof(DaycareBeacon, pokemon)
-                  + count * sizeof(b.pokemon[0]);
+    size_t len = offsetof(DaycareBeacon, pokemon)
+               + b.partyCount * sizeof(b.pokemon[0]);
     s_radio.sendPacket(0xFFFFFFFF, 0, (const uint8_t *)&b, len);
 }
 

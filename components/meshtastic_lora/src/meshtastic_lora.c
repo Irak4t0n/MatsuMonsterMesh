@@ -340,11 +340,7 @@ esp_err_t meshtastic_lora_send_raw(const uint8_t *data, size_t len)
         return pre_err;
     }
 
-    // Brief settle delay after switching from RX to STANDBY_RC. The C6's
-    // ACK for SET_MODE doesn't guarantee the SX1262 has finished its
-    // internal state transition — without this, larger PACKET_TX payloads
-    // get NACKed, possibly because the C6 firmware's TX handler runs
-    // before the chip is fully idle.
+    // Brief settle delay after switching from RX to STANDBY_RC.
     vTaskDelay(pdMS_TO_TICKS(10));
 
     esp_err_t err = lora_send_packet(&pkt);

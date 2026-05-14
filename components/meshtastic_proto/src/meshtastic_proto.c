@@ -952,13 +952,9 @@ static void drain_task(void *arg)
             // probability when multiple relayers hear the same packet.
             {
                 uint8_t hop_limit = meshtastic_hdr_hop_limit(entry.header.flags);
-                // Skip relay for packets that exceed the C6's TX-complete
-                // timeout at SF11/BW250 (~80 bytes on-air). Trying to relay
-                // them just wastes airtime and logs NACK errors.
                 if (!relay_already_seen &&
                     entry.header.from != meshtastic_proto_node_id() &&
-                    hop_limit > 0 &&
-                    raw_len <= 80) {
+                    hop_limit > 0) {
 
                     uint32_t delay_ms = 100 + (esp_random() % 400);
                     vTaskDelay(pdMS_TO_TICKS(delay_ms));

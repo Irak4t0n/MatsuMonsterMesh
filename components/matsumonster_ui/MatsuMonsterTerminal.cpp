@@ -1259,7 +1259,7 @@ void MatsuMonsterTerminal::cmdLoraTxTest(const char *args)
         println("Usage: lora_tx_test <size>");
         println("  Sends an N-byte raw packet (16-byte Meshtastic header");
         println("  + (N-16) dummy payload). N must be 16..256.");
-        println("  Use to find the C6 TX size ceiling.");
+        println("  Use to test TX at various payload sizes.");
         return;
     }
     if (n < 16)  n = 16;

@@ -7,11 +7,11 @@ internet required. Battle, trade, and run a daycare with whoever else is
 on LoRa within range — your save file is the source of truth, the radio
 carries the rest.
 
-> **Status:** active development — LoRa radio is live (RX working,
-> TX for small packets working, large-packet TX under investigation),
-> Meshtastic protocol stack and chat UI are functional, daycare system
-> is wired to the real radio. See [PORTING_NOTES.md](PORTING_NOTES.md)
-> for the open work list.
+> **Status:** active development — LoRa radio is live (RX and TX
+> working, full 6-pokemon daycare beacons transmitted), Meshtastic
+> protocol stack and chat UI are functional, daycare system is wired
+> to the real radio. See [PORTING_NOTES.md](PORTING_NOTES.md) for
+> the open work list.
 
 ---
 
@@ -81,9 +81,8 @@ in the badge-bsp managed component for the full pin map.
 
 ### Meshtastic integration
 - **LoRa radio**: live on US 907.125 MHz LongFast via the C6
-  coprocessor's tanmatsu-radio firmware — RX confirmed working,
-  TX works for small packets (NodeInfo, text), large packets
-  (daycare beacons) under investigation
+  coprocessor's tanmatsu-radio firmware — RX and TX working,
+  full-size daycare beacons (all 6 pokemon) transmitted
 - **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB,
   channel decryption (default key), TEXT_MESSAGE_APP + PRIVATE_APP
   portnum routing
@@ -192,7 +191,7 @@ Things that work today:
 - Alt+M Meshtastic chat UI with compose bar and message history
 - In-emulator notification overlay for incoming mesh messages
 - LoRa RX: receives Meshtastic packets (NodeInfo, text, PRIVATE_APP)
-- LoRa TX: sends small packets (text messages, NodeInfo) successfully
+- LoRa TX: sends packets including full 6-pokemon daycare beacons
 - Daycare auto-check-in on ROM load with real Meshtastic short name
 - Daycare beacon RX: recognises neighbours running upstream MonsterMesh
 - Packet dispatch: PRIVATE_APP packets routed to daycare (beacons) or
@@ -200,10 +199,6 @@ Things that work today:
 
 Things that don't work yet:
 
-- **LoRa TX for large packets**: daycare beacons (~100+ bytes on-air)
-  fail at the C6's tanmatsu-radio firmware level — small packets go
-  through fine, suggesting a payload size limit in the SDIO TX path.
-  This is the main blocker for full daycare interop.
 - The `Gen1Party` mapping out of SRAM into the battle engine uses a
   placeholder party (correct species, default everything else)
 

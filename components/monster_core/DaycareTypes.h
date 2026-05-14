@@ -417,11 +417,8 @@ struct DaycareBeacon {
 #pragma pack(pop)
 
 // ── Compact beacon wire format ──────────────────────────────────────────────
-// The C6 radio coprocessor's TX-complete timeout (~1 s) is too short for
-// on-air packets > ~80 bytes at SF11/BW250.  A full DaycareBeacon with
-// nicknames + moves can reach 142 bytes on-air.  This compact format drops
-// nicknames and moves (2 bytes/pokemon instead of 17), keeping a 6-pokemon
-// beacon at 31 bytes raw → ~52 bytes on-air → well within the C6 ceiling.
+// Compact format drops nicknames and moves (2 bytes/pokemon instead of 17).
+// Accepted on RX for interop with devices that choose to send it.
 //
 // Type byte 0x61 distinguishes compact beacons from the full 0x60 format so
 // receivers that understand both can coexist.

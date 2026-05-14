@@ -9,6 +9,59 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 14 2026 — Send full party + remove C6 TX workarounds (Session 6)
+
+### Goal
+Send all 6 pokemon in daycare beacons (not just the lead), and remove
+all workarounds that were capping/truncating packets to avoid the C6
+radio coprocessor's 1-second TX-complete timeout bug.
+
+### Changes
+
+**`main/monster_wiring.cpp`** — beacon TX:
+- Removed the 1-pokemon cap (`partyCount > 1 ? 1 : ...`) from
+  `daycare_send_beacon_cb`. Now sends the full DaycareBeacon (type 0x60)
+  with all 6 pokemon — daycare events need the whole party for
+  composition templates, interaction picks, etc.
+
+**`components/meshtastic_proto/src/meshtastic_proto.c`** — relay:
+- Removed the `raw_len <= 80` guard from flood relay. All packets are
+  now relayed regardless of size.
+
+**`components/meshtastic_lora/src/meshtastic_lora.c`** — TX path:
+- Trimmed the 10ms settle delay comment (kept the delay, removed the
+  speculative C6 bug explanation).
+
+**`components/monster_core/DaycareTypes.h`** — compact beacon:
+- Replaced the comment blaming the C6 timeout with a neutral description.
+  The compact format still exists for RX interop, just not used for TX.
+
+**`components/matsumonster_ui/MatsuMonsterTerminal.cpp`** — help text:
+- Changed `lora_tx_test` help from "find the C6 TX size ceiling" to
+  "test TX at various payload sizes".
+
+**Upstream issue filed:**
+- [Nicolai-Electronics/tanmatsu-radio#13](https://github.com/Nicolai-Electronics/tanmatsu-radio/issues/13) —
+  the C6 firmware's hardcoded `pdMS_TO_TICKS(1000)` in `transmit_packet()`
+  is too short for LongFast (SF11/BW250) packets > ~80 bytes on-air.
+  The SX1262 TX-complete IRQ fires correctly; the firmware just gives up
+  before it arrives.
+
+### Design decision
+The C6's TX timeout is a firmware bug, not a protocol problem. We send
+full beacons and let the upstream fix their timeout. T-Deck's RadioLib
+has no such issue.
+
+### Files Changed
+- `main/monster_wiring.cpp`
+- `components/meshtastic_proto/src/meshtastic_proto.c`
+- `components/meshtastic_lora/src/meshtastic_lora.c`
+- `components/monster_core/DaycareTypes.h`
+- `components/matsumonster_ui/MatsuMonsterTerminal.cpp`
+- `README.md`
+
+---
+
 ## Session May 14 2026 — Wire daycare callbacks to live LoRa radio (Session 4)
 
 ### Goal
