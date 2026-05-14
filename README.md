@@ -7,9 +7,11 @@ internet required. Battle, trade, and run a daycare with whoever else is
 on LoRa within range — your save file is the source of truth, the radio
 carries the rest.
 
-> **Status:** v0.1.0 — initial port complete and `idf.py build` is green,
-> but hardware testing is still pending. Things are likely to break.
-> See [PORTING_NOTES.md](PORTING_NOTES.md) for the open work list.
+> **Status:** active development — LoRa radio is live (RX working,
+> TX for small packets working, large-packet TX under investigation),
+> Meshtastic protocol stack and chat UI are functional, daycare system
+> is wired to the real radio. See [PORTING_NOTES.md](PORTING_NOTES.md)
+> for the open work list.
 
 ---
 
@@ -71,10 +73,25 @@ in the badge-bsp managed component for the full pin map.
 - Headless Gen 1 battle engine with deterministic dual-side execution
   over a `MeshtasticRadio` abstraction
 - Daycare: party check-in/out, hourly events, friendship/rivalry,
-  achievements, XP write-back to the running ROM's SRAM
+  achievements, XP write-back to the running ROM's SRAM — wired to
+  the live LoRa radio with auto-beacon on ROM load
 - LORD save / Kanto gym roster data (compiled in, gameplay loop pending)
-- BattleLink wire protocol over Meshtastic channel 1
+- BattleLink wire protocol over Meshtastic PRIVATE_APP portnum
 - Fullscreen terminal UI rendered on top of the emulator (Fn+T to toggle)
+
+### Meshtastic integration
+- **LoRa radio**: live on US 907.125 MHz LongFast via the C6
+  coprocessor's tanmatsu-radio firmware — RX confirmed working,
+  TX works for small packets (NodeInfo, text), large packets
+  (daycare beacons) under investigation
+- **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB,
+  channel decryption (default key), TEXT_MESSAGE_APP + PRIVATE_APP
+  portnum routing
+- **Chat UI** (Alt+M): full Meshtastic chat view with compose bar,
+  message history, and in-emulator notification overlay
+- **Daycare ↔ mesh**: beacon TX/RX, broadcast text, DM callbacks
+  all wired through the real radio — cross-device compatible with
+  upstream MonsterMesh on T-Deck
 
 ### Launcher integration
 Designed to install as a regular app on the Tanmatsu launcher via
@@ -143,7 +160,7 @@ make run         # tells the launcher to start it
 | [`main/`](main/) | App entry. `main.c` keeps the unmodified HowBoyMatsu emulator loop; `monster_wiring.cpp` is a small C-ABI bridge that lets `main.c` reach the C++ MonsterMesh subsystems and drives the `EMULATOR ↔ TERMINAL` state machine. |
 | [`components/gnuboy/`](components/gnuboy/) | The gnuboy emulator core, **untouched** — any new emulator-facing functionality is added via wrappers around it, never inside it. |
 | [`components/emulator_sram_iface/`](components/emulator_sram_iface/) | `IEmulatorSRAM` — generic interface to a Game Boy cart's battery RAM. The `gnuboy_sram` adapter points it at gnuboy's live `ram.sbank`. Future emulators implement the same interface to plug in. |
-| [`components/meshtastic_radio/`](components/meshtastic_radio/) | `MeshtasticRadio` interface plus two impls: `StubMeshtasticRadio` (logs sends, returns no packets) and `SerialMeshtasticRadio` (still a stub — see [PORTING_NOTES.md](PORTING_NOTES.md)). `CONFIG_MATSUMONSTER_MESH_STUB` picks between them. |
+| [`components/meshtastic_radio/`](components/meshtastic_radio/) | `MeshtasticRadio` interface plus `LoRaMeshtasticRadio` (live LoRa via the C6) and `StubMeshtasticRadio` (logs sends, returns no packets). The live impl routes PRIVATE_APP packets through the Meshtastic protocol stack. |
 | [`components/monster_core/`](components/monster_core/) | Headless game logic ported from upstream MonsterMesh: Gen 1 battle engine, daycare, LORD save / gym data, BattleLink wire codec. All rendering and Meshtastic-firmware coupling has been stripped — mesh I/O goes through `MeshtasticRadio`, cart RAM through `IEmulatorSRAM`. |
 | [`components/matsumonster_ui/`](components/matsumonster_ui/) | `MatsuMonsterTerminal` — fullscreen text terminal that drives the MonsterMesh subsystems via PAX graphics + the existing BSP input queue. Activated with **Fn+T**, exits with **Fn+T** or ESC. |
 | [`partition_tables/`](partition_tables/) | Partition layout CSVs. `16M.csv` is the one used for Tanmatsu builds. |
@@ -161,28 +178,32 @@ MonsterMesh repo for cross-reference) is also gitignored.
 
 ## Status
 
-**Active development.** The port compiles, the state machine wiring is
-in place, and the stub radio path is exercised end-to-end in code review.
-Nothing in this repo has been flashed to a Tanmatsu yet — the open
-hardware-validation items are tracked in
-[PORTING_NOTES.md](PORTING_NOTES.md), in roughly the order you'd want
-to test them.
+**Active development.** The port is running on real hardware with LoRa
+radio active. The emulator, terminal, chat UI, and daycare system are
+all functional. Cross-device mesh communication with upstream
+MonsterMesh (T-Deck Plus) is partially working.
 
 Things that work today:
 
-- `idf.py build` for `DEVICE=tanmatsu` (binary ~1.0 MB / 1013 KB)
-- The original GBC emulator path is preserved bit-for-bit
-- Fn+T toggles into the terminal; `party`, `status`, `fight`, `run`,
-  `quit`, and `help` commands are wired
-- The stub radio logs every send via `ESP_LOGI(MMRadio, …)`
+- GBC emulation at ~60 FPS, all emulator features (save states, rewind,
+  fast forward, ROM selector)
+- Fn+T terminal with `party`, `status`, `fight`, `daycare_beacon`,
+  `mesh_recent`, `lora_stats`, and more
+- Alt+M Meshtastic chat UI with compose bar and message history
+- In-emulator notification overlay for incoming mesh messages
+- LoRa RX: receives Meshtastic packets (NodeInfo, text, PRIVATE_APP)
+- LoRa TX: sends small packets (text messages, NodeInfo) successfully
+- Daycare auto-check-in on ROM load with real Meshtastic short name
+- Daycare beacon RX: recognises neighbours running upstream MonsterMesh
+- Packet dispatch: PRIVATE_APP packets routed to daycare (beacons) or
+  battle engine by type byte + size disambiguation
 
 Things that don't work yet:
 
-- The C6 serial transport is a stub (the Tanmatsu's P4↔C6 bus is SDIO,
-  not UART; the implementation path is documented but unwritten)
-- Daycare check-in is not auto-triggered from a loaded save — the
-  terminal will show an empty party until `daycare.checkIn(...)` is
-  called from somewhere
+- **LoRa TX for large packets**: daycare beacons (~100+ bytes on-air)
+  fail at the C6's tanmatsu-radio firmware level — small packets go
+  through fine, suggesting a payload size limit in the SDIO TX path.
+  This is the main blocker for full daycare interop.
 - The `Gen1Party` mapping out of SRAM into the battle engine uses a
   placeholder party (correct species, default everything else)
 

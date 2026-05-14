@@ -11,8 +11,10 @@ idf_component_register(
     SRCS
         "meshtastic_radio_stub.cpp"
         "meshtastic_radio_serial.cpp"
+        "meshtastic_radio_lora.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         driver       # uart_driver_install (referenced in serial impl, currently #if 0'd)
         log
+        meshtastic_proto
 )

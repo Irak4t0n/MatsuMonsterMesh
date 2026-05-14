@@ -59,6 +59,7 @@ extern "C" {
 #define MESHTASTIC_PORTNUM_ADMIN_APP          6
 #define MESHTASTIC_PORTNUM_TELEMETRY_APP     67
 #define MESHTASTIC_PORTNUM_TRACEROUTE_APP    70
+#define MESHTASTIC_PORTNUM_PRIVATE_APP      256
 
 typedef struct {
     uint32_t to;
@@ -185,6 +186,13 @@ uint32_t meshtastic_proto_node_id(void);
 // sender will appear as "Unknown" rather than by name.
 esp_err_t meshtastic_send_text(const char *text);
 
+// Send a PRIVATE_APP (portnum 256) payload on the default LongFast
+// channel. Used by MonsterMesh battle/daycare traffic — standard
+// Meshtastic clients silently ignore this portnum. `dest` is a NodeNum
+// (use MESHTASTIC_BROADCAST_ADDR for broadcast).
+esp_err_t meshtastic_send_private(uint32_t dest,
+                                   const uint8_t *payload, size_t len);
+
 // Send a broadcast NodeInfo announce on the default LongFast channel.
 // `long_name` and `short_name` are NUL-terminated UTF-8 strings; pass
 // NULL to use compile-time defaults ("HowBoyMatsu" / "HBM!"). The
@@ -279,6 +287,16 @@ typedef void (*meshtastic_chat_notify_cb_t)(uint32_t from_node,
                                             const char *display_name,
                                             const char *text);
 void meshtastic_proto_set_chat_notify_cb(meshtastic_chat_notify_cb_t cb);
+
+// ── PRIVATE_APP receive callback (Session 4) ──────────────────────────
+//
+// Fired by the drain task for each deduped PRIVATE_APP packet from
+// another node. The callback runs on the drain task and must be quick.
+// Used by LoRaMeshtasticRadio to bridge battle/daycare traffic into
+// the MeshtasticRadio interface.
+typedef void (*meshtastic_private_cb_t)(uint32_t from_node,
+                                        const uint8_t *payload, size_t len);
+void meshtastic_proto_set_private_cb(meshtastic_private_cb_t cb);
 
 // ── Ring buffer of recently-seen parsed packets ────────────────────────
 //

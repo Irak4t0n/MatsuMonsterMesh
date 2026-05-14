@@ -9,6 +9,64 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 14 2026 — Wire daycare callbacks to live LoRa radio (Session 4)
+
+### Goal
+Connect the PokemonDaycare system to the real LoRa radio so the Tanmatsu
+can exchange daycare beacons with other MonsterMesh devices (tested against
+a T-Deck Plus running upstream MonsterMesh).
+
+### Changes
+
+**`main/monster_wiring.cpp`** — bulk of the work:
+- Added three daycare callback functions (`daycare_send_beacon_cb`,
+  `daycare_broadcast_cb`, `daycare_send_dm_cb`) wired via
+  `setSendBeacon` / `setBroadcast` / `setSendDm` in `monster_init()`
+- Beacon callback fills `nodeId` from `meshtastic_proto_node_id()` and
+  trims payload to only populated pokemon slots (reduces on-air size)
+- Added PRIVATE_APP packet dispatch loop in `monster_daycare_tick()`:
+  type 0x60 + size >= `offsetof(DaycareBeacon, pokemon)` → daycare;
+  everything else → battle engine
+- Updated `monster_auto_checkin()` to use real NodeDB short name
+  (falls back to caller-supplied name) and calls `forceBeacon()`
+
+**`main/main.c`**:
+- Removed `MONSTER_STATE_EMULATOR` guard from `monster_daycare_tick()`
+  call — packets are now processed in all app states (terminal, chat,
+  emulator)
+
+**`components/monster_core/BattlePacket.h`**:
+- Added `DAYCARE_BEACON = 0x60` to PktType enum with comment explaining
+  the shared value with TEXT_BATTLE_START (disambiguated by packet size,
+  matching upstream MonsterMesh wire format)
+
+**`components/monster_core/PokemonDaycare.cpp`**:
+- Updated beacon type comment to document upstream compatibility
+
+**`components/matsumonster_ui/MatsuMonsterTerminal.h` / `.cpp`**:
+- Added `daycare_beacon` terminal command with verbose TX diagnostics
+  (party dump, TX OK/FAIL status via `meshtastic_lora_get_stats`)
+- Updated `cmdStatus` to show trainer name and node short name
+
+### Results
+- **RX working**: Tanmatsu receives daycare beacons from T-Deck Plus,
+  neighbours appear in `status` output
+- **TX partially working**: small packets (text, NodeInfo) succeed;
+  daycare beacons (~100+ bytes on-air) fail at the C6 tanmatsu-radio
+  firmware level — `lora_send_packet` returns `ESP_FAIL`
+- Root cause appears to be a payload size limit in the C6's SDIO TX
+  path. Needs further investigation in the tanmatsu-radio firmware.
+
+### Files Changed
+- `main/monster_wiring.cpp`
+- `main/main.c`
+- `components/monster_core/BattlePacket.h`
+- `components/monster_core/PokemonDaycare.cpp`
+- `components/matsumonster_ui/MatsuMonsterTerminal.h`
+- `components/matsumonster_ui/MatsuMonsterTerminal.cpp`
+
+---
+
 ## Architecture
 
 ### Display

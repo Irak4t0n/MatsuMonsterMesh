@@ -116,6 +116,7 @@ private:
     void cmdMeshAnnounce(const char *args);
     // Path #3 Session 3b — NodeDB view.
     void cmdMeshNodes();
+    void cmdDaycareBeacon();
     void cmdQuit();
 
     // ── Internal helpers ────────────────────────────────────────────────────

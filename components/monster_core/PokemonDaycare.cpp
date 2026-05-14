@@ -431,7 +431,7 @@ void PokemonDaycare::broadcastBeacon(uint32_t nowMs) {
     if (!sendBeacon_) return;
 
     DaycareBeacon beacon = {};
-    beacon.type = 0x60;  // DAYCARE_BEACON packet type (0x10 conflicts with BATTLE_REQUEST)
+    beacon.type = 0x60;  // matches upstream MonsterMesh; disambiguated from TEXT_BATTLE_START by size
     beacon.nodeId = 0;   // filled by send callback (from nodeDB)
     strncpy(beacon.shortName, shortName_, 4);
     strncpy(beacon.gameName, gameName_, 7);

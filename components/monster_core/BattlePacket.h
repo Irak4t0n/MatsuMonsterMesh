@@ -37,6 +37,11 @@ enum class PktType : uint8_t {
     TEXT_BATTLE_FORFEIT = 0x62,  // payload: empty (session field identifies battle)
     TEXT_BATTLE_HASH    = 0x63,  // payload: u16 turn | u8 stateHash[8] (desync detection)
     TEXT_BATTLE_PARTY   = 0x64,  // payload chunk: u8 partIdx | u8 partTotal | bytes  (full party data, sent once at start)
+
+    // DaycareBeacon shares 0x60 with TEXT_BATTLE_START — upstream MonsterMesh
+    // uses this value and we must match for cross-device compatibility.
+    // Disambiguated by packet size: beacons are >= sizeof(DaycareBeacon).
+    DAYCARE_BEACON      = 0x60,
 };
 
 // Text-battle action types (TEXT_BATTLE_ACTION.payload[2])

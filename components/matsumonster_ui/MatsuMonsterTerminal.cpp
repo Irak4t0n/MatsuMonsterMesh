@@ -564,6 +564,7 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "mesh_send", &args)) cmdMeshSend(args);
     else if (starts_with(cmd, "mesh_announce", &args)) cmdMeshAnnounce(args);
     else if (starts_with(cmd, "mesh_nodes", &args)) cmdMeshNodes();
+    else if (starts_with(cmd, "daycare_beacon", &args)) cmdDaycareBeacon();
     else if (starts_with(cmd, "quit",   &args))  cmdQuit();
     else if (starts_with(cmd, "exit",   &args))  cmdQuit();
     else if (starts_with(cmd, "help",   &args))  cmdHelp();
@@ -588,6 +589,7 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  mesh_send <t> — broadcast text message <t> on LongFast");
     println("  mesh_announce — broadcast NodeInfo (so T-Deck shows our name)");
     println("  mesh_nodes    — list nodes we've heard NodeInfo from");
+    println("  daycare_beacon— force an immediate daycare beacon broadcast");
     println("  quit          — back to emulator");
 }
 
@@ -634,8 +636,10 @@ void MatsuMonsterTerminal::cmdStatus()
 
     const auto &state = daycare_->getState();
     printf_line("Daycare:    %s", daycare_->isActive() ? "active" : "idle");
+    printf_line("Trainer:    %s  Node: %s",
+                daycare_->getGameName(), daycare_->getShortName());
     printf_line("Party:      %u", (unsigned)state.partyCount);
-    printf_line("Neighbors:  %d (radio reports %d)",
+    printf_line("Neighbors:  %d (mesh nodes: %d)",
                 (int)daycare_->getNeighborCount(),
                 radio_->getNeighborCount());
     printf_line("Achievements: 0x%016llx",
@@ -1204,6 +1208,39 @@ void MatsuMonsterTerminal::cmdMeshAnnounce(const char *args)
                     (unsigned long)meshtastic_proto_node_id());
     } else {
         printf_line("mesh_announce: FAILED (%s)", esp_err_to_name(err));
+    }
+}
+
+void MatsuMonsterTerminal::cmdDaycareBeacon()
+{
+    if (!daycare_) { println("(no daycare wired)"); return; }
+    if (!daycare_->isActive()) { println("Daycare not active (no check-in yet)"); return; }
+
+    const auto &state = daycare_->getState();
+    printf_line("Beacon: node=%s trainer=%s party=%u",
+                daycare_->getShortName(), daycare_->getGameName(),
+                (unsigned)state.partyCount);
+    for (uint8_t i = 0; i < state.partyCount && i < 6; i++) {
+        const char *nick = state.pokemon[i].nickname[0]
+                               ? state.pokemon[i].nickname
+                               : speciesName(state.pokemon[i].speciesDex);
+        printf_line("  #%u %s Lv%u", (unsigned)state.pokemon[i].speciesDex,
+                    nick, (unsigned)(state.pokemon[i].savLevel + state.pokemon[i].totalLevelsGained));
+    }
+
+    meshtastic_lora_stats_t before;
+    meshtastic_lora_get_stats(&before);
+
+    daycare_->forceBeacon();
+
+    meshtastic_lora_stats_t after;
+    meshtastic_lora_get_stats(&after);
+    if (after.tx_ok > before.tx_ok) {
+        printf_line("TX OK (size=%u bytes on-air)", (unsigned)(after.tx_ok - before.tx_ok));
+    } else if (after.tx_err > before.tx_err) {
+        println("TX FAILED — check lora_stats");
+    } else {
+        println("TX status unclear — check lora_stats");
     }
 }
 

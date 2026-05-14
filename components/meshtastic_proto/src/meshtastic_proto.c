@@ -371,6 +371,14 @@ void meshtastic_proto_set_chat_notify_cb(meshtastic_chat_notify_cb_t cb)
     s_chat_notify_cb = cb;
 }
 
+// Session 4: PRIVATE_APP receive callback for battle/daycare traffic.
+static meshtastic_private_cb_t s_private_cb = NULL;
+
+void meshtastic_proto_set_private_cb(meshtastic_private_cb_t cb)
+{
+    s_private_cb = cb;
+}
+
 // ── NodeDB (Session 3b) ───────────────────────────────────────────────
 
 static meshtastic_node_entry_t s_nodedb[MESHTASTIC_NODEDB_CAP];
@@ -626,6 +634,29 @@ esp_err_t meshtastic_send_text(const char *text)
     return send_data_frame(MESHTASTIC_BROADCAST_ADDR, pkt_id, data_pb, pos);
 }
 
+esp_err_t meshtastic_send_private(uint32_t dest,
+                                   const uint8_t *payload, size_t len)
+{
+    if (!payload || len == 0) return ESP_ERR_INVALID_ARG;
+    if (len > 200)            len = 200;
+
+    uint32_t pkt_id = esp_random() | 0x80000000u;
+
+    // Build the Data protobuf:
+    //   field 1 (portnum, varint) = PRIVATE_APP (256)
+    //   field 2 (payload, bytes)  = <caller's payload>
+    uint8_t data_pb[256];
+    size_t  pos = 0;
+    pb_write_varint(data_pb, &pos, (1 << 3) | 0);     // tag field=1 wt=varint
+    pb_write_varint(data_pb, &pos, MESHTASTIC_PORTNUM_PRIVATE_APP);
+    pb_write_varint(data_pb, &pos, (2 << 3) | 2);     // tag field=2 wt=length-delim
+    pb_write_varint(data_pb, &pos, (uint32_t)len);
+    memcpy(data_pb + pos, payload, len);
+    pos += len;
+
+    return send_data_frame(dest, pkt_id, data_pb, pos);
+}
+
 esp_err_t meshtastic_send_nodeinfo(const char *long_name, const char *short_name)
 {
     if (!long_name)  long_name  = MT_DEFAULT_LONG_NAME;
@@ -870,6 +901,19 @@ static void drain_task(void *arg)
                                 snprintf(entry.body, sizeof(entry.body),
                                          "(%s)", shortn);
                             }
+                        } else if (d.portnum == MESHTASTIC_PORTNUM_PRIVATE_APP) {
+                            // Session 4: forward PRIVATE_APP payloads to
+                            // the battle/daycare radio layer. Gate on
+                            // relay_already_seen (dedup) and from != self
+                            // (avoid processing our own reflected packets).
+                            if (!relay_already_seen &&
+                                entry.header.from != meshtastic_proto_node_id() &&
+                                s_private_cb && d.payload_len > 0) {
+                                s_private_cb(entry.header.from,
+                                             d.payload, d.payload_len);
+                            }
+                            snprintf(entry.body, sizeof(entry.body),
+                                     "PRIVATE(%u)", (unsigned)d.payload_len);
                         }
                     }
                 }

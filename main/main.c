@@ -402,12 +402,11 @@ void vid_end(void) {
     frame_count++;
     if (last_time == 0) last_time = esp_timer_get_time();
 
-    // Drive the MonsterMesh daycare. Internally rate-limited to 10s, so
-    // calling every frame is cheap and only does real work in emulator state
-    // (the bypass at the top of doevents() keeps us out of TERMINAL anyway).
-    if (monster_get_state() == MONSTER_STATE_EMULATOR) {
-        monster_daycare_tick();
-    }
+    // Drive the MonsterMesh daycare + packet dispatch. Called every frame
+    // regardless of state so PRIVATE_APP packets (beacons, battle) are
+    // drained even while the terminal or chat UI is active. The daycare
+    // tick itself is internally rate-limited to 10s.
+    monster_daycare_tick();
 
     if (return_to_selector) {
         bsp_audio_set_volume(0);

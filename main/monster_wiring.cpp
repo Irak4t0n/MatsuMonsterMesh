@@ -5,12 +5,13 @@
 
 #include "monster_wiring.h"
 
+#include <string.h>
+
 #include "esp_log.h"
 #include "esp_timer.h"
 
 #include "MeshtasticRadio.h"
-#include "meshtastic_radio_stub.h"
-#include "meshtastic_radio_serial.h"
+#include "meshtastic_radio_lora.h"
 #include "meshtastic_lora.h"     // Session 1 of Path #3: raw LoRa bring-up
 #include "meshtastic_proto.h"    // Session 2a: parse 16-byte plaintext header
 #include "PokemonDaycare.h"
@@ -41,11 +42,7 @@ extern "C" void mm_sram_persist(void);
 
 // ── Static storage for the C++ subsystem ────────────────────────────────────
 
-#ifdef CONFIG_MATSUMONSTER_MESH_STUB
-static StubMeshtasticRadio    s_radio;
-#else
-static SerialMeshtasticRadio  s_radio;
-#endif
+static LoRaMeshtasticRadio     s_radio;
 
 static PokemonDaycare         s_daycare;
 static MonsterMeshTextBattle  s_battle(&s_radio);
@@ -63,6 +60,46 @@ static bool                   s_sram_ok  = false;
 
 static inline uint32_t now_ms() {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+// ── Daycare callback stubs ────────────────────────────────────────────────────
+//
+// These are wired to s_daycare.setSendBeacon / setBroadcast / setSendDm in
+// monster_init(). Each callback has a `void *ctx` that we ignore (the
+// static objects are file-scoped anyway).
+
+static void daycare_send_beacon_cb(const DaycareBeacon &beacon, void *ctx)
+{
+    (void)ctx;
+    // Fill in the nodeId that PokemonDaycare leaves as 0 (it doesn't
+    // know our Meshtastic node number).
+    DaycareBeacon b = beacon;
+    b.nodeId = meshtastic_proto_node_id();
+    // Only send the populated pokemon slots to keep the on-air packet
+    // small enough for the C6's tanmatsu-radio TX path. A full 6-pokemon
+    // beacon is ~142 bytes on-air and the C6 NACKs it; trimming to the
+    // actual party count keeps it under ~100 bytes for typical parties.
+    uint8_t count = b.partyCount > 6 ? 6 : b.partyCount;
+    size_t  len   = offsetof(DaycareBeacon, pokemon)
+                  + count * sizeof(b.pokemon[0]);
+    s_radio.sendPacket(0xFFFFFFFF, 0, (const uint8_t *)&b, len);
+}
+
+static void daycare_broadcast_cb(const char *msg, void *ctx)
+{
+    (void)ctx;
+    // Achievement / flavour text → Meshtastic default text channel.
+    meshtastic_send_text(msg);
+}
+
+static void daycare_send_dm_cb(uint32_t destNodeId, const char *msg, void *ctx)
+{
+    (void)ctx;
+    // The upstream DM path sends to a specific node's text channel. We
+    // don't have directed text messaging, so broadcast it instead — the
+    // daycare DMs are fun flavour text that everyone can enjoy.
+    (void)destNodeId;
+    meshtastic_send_text(msg);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +130,16 @@ extern "C" void monster_init(pax_buf_t *fb, int canvas_w, int canvas_h,
         }
     }
 
+    // Session 4: wire the battle/daycare radio to the live LoRa stack.
+    // Creates the PRIVATE_APP RX queue and registers the drain-task
+    // callback. Degrades gracefully if the LoRa layer didn't come up
+    // (sendPacket returns false, pollPackets returns 0).
+    s_radio.begin();
+
     s_daycare.init();   // zero-init state, magic, partyCount=0 → tick() is a no-op until checkIn
+    s_daycare.setSendBeacon(daycare_send_beacon_cb, nullptr);
+    s_daycare.setBroadcast(daycare_broadcast_cb, nullptr);
+    s_daycare.setSendDm(daycare_send_dm_cb, nullptr);
 
     static uint8_t terminal_storage[sizeof(MatsuMonsterTerminal)] alignas(MatsuMonsterTerminal);
     s_terminal = new (terminal_storage)
@@ -111,14 +157,7 @@ extern "C" void monster_init(pax_buf_t *fb, int canvas_w, int canvas_h,
     s_chat->setInputQueue(input_q);
 
     s_inited = true;
-    ESP_LOGI(TAG,
-             "monster_wiring init done (radio=%s)",
-#ifdef CONFIG_MATSUMONSTER_MESH_STUB
-             "Stub"
-#else
-             "Serial"
-#endif
-            );
+    ESP_LOGI(TAG, "monster_wiring init done (radio=LoRa)");
 }
 
 extern "C" void monster_init_sram(void)
@@ -159,8 +198,17 @@ extern "C" void monster_auto_checkin(const char *shortName)
         gameName[i] = gen1CharToAscii(c);
     }
 
+    // Try the real Meshtastic short name from the NodeDB first; fall back
+    // to the caller-supplied name (typically "MM01" until the radio is up).
+    char realShort[MESHTASTIC_NODE_NAME_SHORT] = {};
     const char *sn = shortName ? shortName : "MM01";
+    if (meshtastic_nodedb_lookup(meshtastic_proto_node_id(),
+                                 NULL, 0, realShort, sizeof(realShort))
+        && realShort[0] != '\0') {
+        sn = realShort;
+    }
     s_daycare.checkIn(sram, sn, gameName);
+    s_daycare.forceBeacon();
 
     const auto &state = s_daycare.getState();
     ESP_LOGI(TAG, "auto-checkin: trainer='%s' shortName='%s' party=%u",
@@ -170,6 +218,33 @@ extern "C" void monster_auto_checkin(const char *shortName)
 extern "C" void monster_daycare_tick(void)
 {
     if (!s_inited) return;
+
+    // ── Drain incoming PRIVATE_APP packets and route to battle / daycare ──
+    // This runs every frame so we don't queue-starve during fast exchanges.
+    // DaycareBeacon and TEXT_BATTLE_START share type byte 0x60 (upstream
+    // MonsterMesh compat). We disambiguate by size: beacons are large
+    // (>= sizeof(DaycareBeacon)), battle-start packets are small (~18 B).
+    MeshPacketSimple pkts[4];
+    int n = s_radio.pollPackets(pkts, 4);
+    for (int i = 0; i < n; i++) {
+        if (pkts[i].payload_len < 1) continue;
+        uint8_t type = pkts[i].payload[0];
+        // Min beacon size = header fields only (no pokemon).
+        if (type == 0x60 &&
+            pkts[i].payload_len >= offsetof(DaycareBeacon, pokemon)) {
+            DaycareBeacon beacon = {};
+            size_t copy = pkts[i].payload_len < sizeof(DaycareBeacon)
+                              ? pkts[i].payload_len : sizeof(DaycareBeacon);
+            memcpy(&beacon, pkts[i].payload, copy);
+            s_daycare.handleBeacon(beacon);
+        } else {
+            // Everything else → battle engine (it checks PktType internally).
+            s_battle.handlePacket(pkts[i].from,
+                                  pkts[i].payload, pkts[i].payload_len);
+        }
+    }
+
+    // ── Rate-limited daycare tick (beacons, events, mood, etc.) ───────────
     static uint32_t last_tick_ms = 0;
     uint32_t t = now_ms();
     if (t - last_tick_ms < 10000) return;   // 10s cadence (matches Step 6 spec)
