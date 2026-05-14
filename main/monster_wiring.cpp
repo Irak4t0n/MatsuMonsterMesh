@@ -71,15 +71,18 @@ static inline uint32_t now_ms() {
 static void daycare_send_beacon_cb(const DaycareBeacon &beacon, void *ctx)
 {
     (void)ctx;
-    // Fill in the nodeId that PokemonDaycare leaves as 0 (it doesn't
-    // know our Meshtastic node number).
+    // The C6 radio coprocessor times out on TX for packets > ~80 bytes
+    // on-air at SF11/BW250. A full 6-pokemon DaycareBeacon is ~142 bytes
+    // on-air — way over.  Cap to 1 pokemon so the on-air size stays under
+    // 60 bytes (19 header + 17 per pokemon + 16 Meshtastic + ~5 protobuf
+    // = ~57 on-air). This keeps T-Deck compatibility (type 0x60) while
+    // fitting within the C6's TX-complete timeout budget.  The lead
+    // pokemon is the most important for daycare interactions anyway.
     DaycareBeacon b = beacon;
     b.nodeId = meshtastic_proto_node_id();
-    // Only send the populated pokemon slots to keep the on-air packet
-    // small enough for the C6's tanmatsu-radio TX path. A full 6-pokemon
-    // beacon is ~142 bytes on-air and the C6 NACKs it; trimming to the
-    // actual party count keeps it under ~100 bytes for typical parties.
-    uint8_t count = b.partyCount > 6 ? 6 : b.partyCount;
+    // Cap to 1 pokemon to stay under the C6's ~80 byte TX ceiling.
+    uint8_t count = b.partyCount > 1 ? 1 : b.partyCount;
+    b.partyCount  = count;
     size_t  len   = offsetof(DaycareBeacon, pokemon)
                   + count * sizeof(b.pokemon[0]);
     s_radio.sendPacket(0xFFFFFFFF, 0, (const uint8_t *)&b, len);
@@ -226,16 +229,32 @@ extern "C" void monster_daycare_tick(void)
     // (>= sizeof(DaycareBeacon)), battle-start packets are small (~18 B).
     MeshPacketSimple pkts[4];
     int n = s_radio.pollPackets(pkts, 4);
+    if (n > 0) {
+        ESP_LOGI(TAG, "PRIVATE_APP: got %d pkt(s)", n);
+    }
     for (int i = 0; i < n; i++) {
         if (pkts[i].payload_len < 1) continue;
         uint8_t type = pkts[i].payload[0];
-        // Min beacon size = header fields only (no pokemon).
-        if (type == 0x60 &&
+        ESP_LOGI(TAG, "  pkt[%d] from=!%08lx type=0x%02x len=%u",
+                 i, (unsigned long)pkts[i].from, type,
+                 (unsigned)pkts[i].payload_len);
+        // Full beacon (0x60) — sent by T-Deck Plus / upstream MonsterMesh.
+        if (type == DAYCARE_BEACON_TYPE_FULL &&
             pkts[i].payload_len >= offsetof(DaycareBeacon, pokemon)) {
             DaycareBeacon beacon = {};
             size_t copy = pkts[i].payload_len < sizeof(DaycareBeacon)
                               ? pkts[i].payload_len : sizeof(DaycareBeacon);
             memcpy(&beacon, pkts[i].payload, copy);
+            s_daycare.handleBeacon(beacon);
+        // Compact beacon (0x61) — sent by other Tanmatsu devices.
+        } else if (type == DAYCARE_BEACON_TYPE_COMPACT &&
+                   pkts[i].payload_len >= offsetof(DaycareBeaconCompact, pokemon)) {
+            DaycareBeaconCompact compact = {};
+            size_t copy = pkts[i].payload_len < sizeof(DaycareBeaconCompact)
+                              ? pkts[i].payload_len : sizeof(DaycareBeaconCompact);
+            memcpy(&compact, pkts[i].payload, copy);
+            DaycareBeacon beacon = {};
+            daycareBeaconFromCompact(beacon, compact);
             s_daycare.handleBeacon(beacon);
         } else {
             // Everything else → battle engine (it checks PktType internally).

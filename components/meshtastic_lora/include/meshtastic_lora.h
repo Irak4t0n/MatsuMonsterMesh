@@ -121,6 +121,7 @@ typedef struct {
     int32_t  last_tx_pre_mode_err;
     int32_t  last_tx_post_mode_err;
     uint32_t last_tx_ms;
+    uint16_t last_tx_len;          // raw on-air byte count of last TX attempt
 } meshtastic_lora_stats_t;
 
 void meshtastic_lora_get_stats(meshtastic_lora_stats_t *out);

@@ -117,6 +117,7 @@ private:
     // Path #3 Session 3b — NodeDB view.
     void cmdMeshNodes();
     void cmdDaycareBeacon();
+    void cmdLoraTxTest(const char *args);
     void cmdQuit();
 
     // ── Internal helpers ────────────────────────────────────────────────────

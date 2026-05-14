@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #include "monster_core_compat.h"   // for mm_millis()
 
 // ── Weather ──────────────────────────────────────────────────────────────────
@@ -414,6 +415,63 @@ struct DaycareBeacon {
     } pokemon[6];
 };
 #pragma pack(pop)
+
+// ── Compact beacon wire format ──────────────────────────────────────────────
+// The C6 radio coprocessor's TX-complete timeout (~1 s) is too short for
+// on-air packets > ~80 bytes at SF11/BW250.  A full DaycareBeacon with
+// nicknames + moves can reach 142 bytes on-air.  This compact format drops
+// nicknames and moves (2 bytes/pokemon instead of 17), keeping a 6-pokemon
+// beacon at 31 bytes raw → ~52 bytes on-air → well within the C6 ceiling.
+//
+// Type byte 0x61 distinguishes compact beacons from the full 0x60 format so
+// receivers that understand both can coexist.
+
+#define DAYCARE_BEACON_TYPE_FULL    0x60
+#define DAYCARE_BEACON_TYPE_COMPACT 0x61
+
+#pragma pack(push, 1)
+struct DaycareBeaconCompact {
+    uint8_t  type;          // DAYCARE_BEACON_TYPE_COMPACT (0x61)
+    uint32_t nodeId;
+    char     shortName[5];
+    char     gameName[8];
+    uint8_t  partyCount;
+    struct {
+        uint8_t species;
+        uint8_t level;
+    } pokemon[6];           // 2 bytes each instead of 17
+};
+#pragma pack(pop)
+
+// Inflate a compact beacon into a full DaycareBeacon (nicknames/moves zeroed).
+inline void daycareBeaconFromCompact(DaycareBeacon &out,
+                                     const DaycareBeaconCompact &c) {
+    memset(&out, 0, sizeof(out));
+    out.type       = DAYCARE_BEACON_TYPE_FULL;
+    out.nodeId     = c.nodeId;
+    memcpy(out.shortName, c.shortName, sizeof(out.shortName));
+    memcpy(out.gameName,  c.gameName,  sizeof(out.gameName));
+    out.partyCount = c.partyCount > 6 ? 6 : c.partyCount;
+    for (uint8_t i = 0; i < out.partyCount; ++i) {
+        out.pokemon[i].species = c.pokemon[i].species;
+        out.pokemon[i].level   = c.pokemon[i].level;
+    }
+}
+
+// Deflate a full beacon into compact wire format.
+inline void daycareBeaconToCompact(DaycareBeaconCompact &out,
+                                   const DaycareBeacon &b) {
+    memset(&out, 0, sizeof(out));
+    out.type       = DAYCARE_BEACON_TYPE_COMPACT;
+    out.nodeId     = b.nodeId;
+    memcpy(out.shortName, b.shortName, sizeof(out.shortName));
+    memcpy(out.gameName,  b.gameName,  sizeof(out.gameName));
+    out.partyCount = b.partyCount > 6 ? 6 : b.partyCount;
+    for (uint8_t i = 0; i < out.partyCount; ++i) {
+        out.pokemon[i].species = b.pokemon[i].species;
+        out.pokemon[i].level   = b.pokemon[i].level;
+    }
+}
 
 // ── Weather type XP multiplier per Pokemon type ──────────────────────────────
 // Returns multiplier x100 (150 = 1.5x boost, 75 = 0.75x penalty, 100 = neutral)

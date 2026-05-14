@@ -15,6 +15,7 @@
 #include "MatsuMonsterTerminal.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 
@@ -565,6 +566,7 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "mesh_announce", &args)) cmdMeshAnnounce(args);
     else if (starts_with(cmd, "mesh_nodes", &args)) cmdMeshNodes();
     else if (starts_with(cmd, "daycare_beacon", &args)) cmdDaycareBeacon();
+    else if (starts_with(cmd, "lora_tx_test", &args)) cmdLoraTxTest(args);
     else if (starts_with(cmd, "quit",   &args))  cmdQuit();
     else if (starts_with(cmd, "exit",   &args))  cmdQuit();
     else if (starts_with(cmd, "help",   &args))  cmdHelp();
@@ -590,6 +592,7 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  mesh_announce — broadcast NodeInfo (so T-Deck shows our name)");
     println("  mesh_nodes    — list nodes we've heard NodeInfo from");
     println("  daycare_beacon— force an immediate daycare beacon broadcast");
+    println("  lora_tx_test N— send N-byte dummy packet (find TX size limit)");
     println("  quit          — back to emulator");
 }
 
@@ -983,11 +986,12 @@ void MatsuMonsterTerminal::cmdLoraStats()
                 (unsigned)s.last_config_ms);
     printf_line("  mode_err=%d  ms=%u",  (int)s.last_mode_err,
                 (unsigned)s.last_mode_ms);
-    printf_line("  tx_pre=%d tx=%d tx_post=%d  ms=%u",
+    printf_line("  tx_pre=%d tx=%d tx_post=%d  ms=%u len=%u",
                 (int)s.last_tx_pre_mode_err,
                 (int)s.last_tx_err,
                 (int)s.last_tx_post_mode_err,
-                (unsigned)s.last_tx_ms);
+                (unsigned)s.last_tx_ms,
+                (unsigned)s.last_tx_len);
 }
 
 void MatsuMonsterTerminal::cmdLoraReinit()
@@ -1241,6 +1245,60 @@ void MatsuMonsterTerminal::cmdDaycareBeacon()
         println("TX FAILED — check lora_stats");
     } else {
         println("TX status unclear — check lora_stats");
+    }
+}
+
+void MatsuMonsterTerminal::cmdLoraTxTest(const char *args)
+{
+    if (!meshtastic_lora_is_up()) {
+        println("(radio not up — try lora_reinit)");
+        return;
+    }
+    int n = 0;
+    if (!args || !*args || (n = atoi(args)) < 1) {
+        println("Usage: lora_tx_test <size>");
+        println("  Sends an N-byte raw packet (16-byte Meshtastic header");
+        println("  + (N-16) dummy payload). N must be 16..256.");
+        println("  Use to find the C6 TX size ceiling.");
+        return;
+    }
+    if (n < 16)  n = 16;
+    if (n > 256) n = 256;
+
+    // Build a valid-looking Meshtastic packet so the C6 treats it the
+    // same as a real TX. The header is 16 bytes; fill the rest with 0xAA.
+    uint8_t pkt[256];
+    memset(pkt, 0xAA, sizeof(pkt));
+    // Minimal header: to=broadcast, from=our node, random id, flags
+    uint32_t bcast = 0xFFFFFFFF;
+    uint32_t from  = meshtastic_proto_node_id();
+    uint32_t id    = (uint32_t)esp_random();
+    memcpy(pkt + 0, &bcast, 4);
+    memcpy(pkt + 4, &from,  4);
+    memcpy(pkt + 8, &id,    4);
+    pkt[12] = 0x63;  // flags: hop_limit=3, hop_start=3
+    pkt[13] = 0x08;  // channel hash (LongFast)
+    pkt[14] = 0;
+    pkt[15] = 0;
+
+    printf_line("TX test: %d bytes...", n);
+
+    meshtastic_lora_stats_t before;
+    meshtastic_lora_get_stats(&before);
+
+    esp_err_t err = meshtastic_lora_send_raw((const uint8_t *)pkt, (size_t)n);
+
+    meshtastic_lora_stats_t after;
+    meshtastic_lora_get_stats(&after);
+
+    if (err == ESP_OK) {
+        printf_line("  OK (%d bytes sent)", n);
+    } else {
+        printf_line("  FAIL: %s (0x%x)", esp_err_to_name(err), (int)err);
+        printf_line("  pre_mode=%d tx_err=%d post_mode=%d",
+                    (int)after.last_tx_pre_mode_err,
+                    (int)after.last_tx_err,
+                    (int)after.last_tx_post_mode_err);
     }
 }
 

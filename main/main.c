@@ -682,6 +682,10 @@ void doevents(void) {
         // the terminal back to emulator state; vTaskDelay yields the CPU
         // so blit_task / audio_task / ss_io can still get scheduled.
         while (!monster_terminal_pump()) {
+            // vid_end() doesn't run while the emulator is halted, so we
+            // must pump the daycare here to drain incoming PRIVATE_APP
+            // packets (beacons, battle) and fire periodic beacon TX.
+            monster_daycare_tick();
             vTaskDelay(pdMS_TO_TICKS(16));
         }
         return;
@@ -699,6 +703,7 @@ void doevents(void) {
             if (i < 4) key_release_time[i] = 0;
         }
         while (!monster_chat_pump()) {
+            monster_daycare_tick();
             vTaskDelay(pdMS_TO_TICKS(16));
         }
         return;
