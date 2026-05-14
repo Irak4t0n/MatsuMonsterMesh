@@ -219,6 +219,13 @@ static size_t                  s_chat_count = 0;
 static uint32_t                s_chat_total = 0;
 static SemaphoreHandle_t       s_chat_mtx   = NULL;
 
+// Session 3c: notify-on-new-message hook for the in-emulator overlay.
+// Defined later via meshtastic_proto_set_chat_notify_cb(); fired from
+// chat_push for deduped, non-self messages only. Declared up here so
+// chat_push (below) can reference it before the setter implementation
+// further down the file.
+static meshtastic_chat_notify_cb_t s_chat_notify_cb = NULL;
+
 static void chat_init(void)
 {
     if (s_chat_mtx == NULL) {
@@ -290,7 +297,24 @@ static void chat_push(uint32_t from, uint32_t pkt_id, bool is_self,
     }
     e->text[out]  = '\0';
     e->text_len   = (uint8_t)out;
+
+    // Capture what we need for the notification callback while still
+    // holding the lock (cheap copy), then invoke the callback OUTSIDE
+    // the lock so handlers can call back into the proto layer without
+    // deadlocking.
+    bool        fire_cb = (!is_self) && (s_chat_notify_cb != NULL) && (out > 0);
+    char        cb_text[MESHTASTIC_CHAT_TEXT_MAX];
+    uint32_t    cb_from = from;
+    if (fire_cb) {
+        memcpy(cb_text, e->text, out + 1);
+    }
     xSemaphoreGive(s_chat_mtx);
+
+    if (fire_cb) {
+        char who[16];
+        meshtastic_format_node(cb_from, who, sizeof(who));
+        s_chat_notify_cb(cb_from, who, cb_text);
+    }
 }
 
 size_t meshtastic_chat_snapshot(meshtastic_chat_entry_t *out, size_t max_out)
@@ -314,6 +338,12 @@ uint32_t meshtastic_chat_total(void)
     uint32_t v = s_chat_total;
     xSemaphoreGive(s_chat_mtx);
     return v;
+}
+
+// Setter for the s_chat_notify_cb hook declared at the top of the file.
+void meshtastic_proto_set_chat_notify_cb(meshtastic_chat_notify_cb_t cb)
+{
+    s_chat_notify_cb = cb;
 }
 
 // ── NodeDB (Session 3b) ───────────────────────────────────────────────

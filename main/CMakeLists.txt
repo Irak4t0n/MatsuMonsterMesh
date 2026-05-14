@@ -10,6 +10,7 @@ idf_component_register(
 		"menu.c"
 		"rom_selector.c"
 		"monster_wiring.cpp"
+		"notification_overlay.c"
 	PRIV_REQUIRES
                 esp_mm
 		esp_lcd

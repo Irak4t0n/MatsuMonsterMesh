@@ -264,6 +264,22 @@ size_t meshtastic_chat_snapshot(meshtastic_chat_entry_t *out, size_t max_out);
 // Total messages pushed since boot (sent + received). Doesn't reset.
 uint32_t meshtastic_chat_total(void);
 
+// ── Chat notify callback (Session 3c) ────────────────────────────────
+//
+// Optional hook fired once per *deduped* inbound TextMessage. Used by
+// the in-emulator notification overlay so a popup appears whenever a
+// message arrives, even when the user isn't in the chat UI. The
+// callback runs on the drain task, so handlers must be quick and
+// non-blocking — typical usage is to copy the args into a struct that
+// the rendering loop polls.
+//
+// Not called for our own outbound messages (is_self == true), since
+// you presumably don't want a notification for what you just typed.
+typedef void (*meshtastic_chat_notify_cb_t)(uint32_t from_node,
+                                            const char *display_name,
+                                            const char *text);
+void meshtastic_proto_set_chat_notify_cb(meshtastic_chat_notify_cb_t cb);
+
 // ── Ring buffer of recently-seen parsed packets ────────────────────────
 //
 // Background task pulls raw bytes off meshtastic_lora's queue, parses

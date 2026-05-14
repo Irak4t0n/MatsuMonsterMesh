@@ -49,7 +49,8 @@ void rtc_load(FILE *f);
 #include "config.h"
 #include "menu.h"
 #include "rom_selector.h"
-#include "monster_wiring.h"   // C ABI bridge to monster_core / terminal / radio
+#include "monster_wiring.h"        // C ABI bridge to monster_core / terminal / radio
+#include "notification_overlay.h"  // Path #3 Session 3c: in-emulator mesh toast
 
 // gnuboy globals required by the emulator core
 struct fb  fb;
@@ -1092,6 +1093,9 @@ void blit_task(void *arg) {
         uint8_t *buf = (active_render_buf == 0) ? render_buf_a : render_buf_b;
 
         draw_fps_overlay(buf);
+        // Session 3c: paint the Meshtastic toast on top of the GBC
+        // frame when a message is currently active. No-op otherwise.
+        notification_overlay_render(buf);
 
         // Save state menu overlay — only redraw when stale (persistent-render pattern)
         if (ss_state == SS_MENU_OPEN || ss_state == SS_MENU_SAVING ||
@@ -1421,6 +1425,13 @@ void app_main(void) {
     }
     memset(render_buf_a, 0, PHYS_W * PHYS_H * 2);
     memset(render_buf_b, 0, PHYS_W * PHYS_H * 2);
+
+    // Session 3c: wrap the GBC framebuffers in pax_buf_t so the
+    // notification overlay can paint into them. Must come AFTER the
+    // heap_caps_malloc above — the pax wrappers store the buffer
+    // pointers directly. render_buf_b is file-static so we hand both
+    // pointers in explicitly rather than extern'ing.
+    notification_overlay_init(render_buf_a, render_buf_b);
 
     sem_frame_ready = xSemaphoreCreateBinary();
     sem_frame_done  = xSemaphoreCreateBinary();
