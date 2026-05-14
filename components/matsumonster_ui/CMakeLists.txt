@@ -5,10 +5,13 @@
 idf_component_register(
     SRCS
         "MatsuMonsterTerminal.cpp"
+        "MeshtasticChatView.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         monster_core
         meshtastic_radio
+        meshtastic_lora                 # for cmdLoraSend / cmdLoraStats
+        meshtastic_proto                # for cmdMeshRecent (Session 2a)
         emulator_sram_iface
         badge-bsp                  # bsp/display.h, bsp/input.h
         robotman2412__pax-gfx      # pax_gfx.h, pax_text.h, pax_fonts.h

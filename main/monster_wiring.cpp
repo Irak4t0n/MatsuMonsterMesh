@@ -11,9 +11,12 @@
 #include "MeshtasticRadio.h"
 #include "meshtastic_radio_stub.h"
 #include "meshtastic_radio_serial.h"
+#include "meshtastic_lora.h"     // Session 1 of Path #3: raw LoRa bring-up
+#include "meshtastic_proto.h"    // Session 2a: parse 16-byte plaintext header
 #include "PokemonDaycare.h"
 #include "MonsterMeshTextBattle.h"
 #include "MatsuMonsterTerminal.h"
+#include "MeshtasticChatView.h"   // Path #3 Session 5: full Meshtastic UI
 #include "emulator_sram_iface.h"
 #include "gnuboy_sram.h"
 #include "DaycareSavPatcher.h"   // gen1CharToAscii + SAV_* constants
@@ -51,6 +54,8 @@ static IEmulatorSRAM          s_sram = {};
 // MatsuMonsterTerminal is held by pointer so we can construct it after we
 // know the canvas dims — same pattern main.c uses for several globals.
 static MatsuMonsterTerminal  *s_terminal = nullptr;
+// Path #3 Session 5: same storage trick for the chat view.
+static MeshtasticChatView    *s_chat     = nullptr;
 
 static monster_state_t        s_state    = MONSTER_STATE_EMULATOR;
 static bool                   s_inited   = false;
@@ -67,6 +72,27 @@ extern "C" void monster_init(pax_buf_t *fb, int canvas_w, int canvas_h,
 {
     if (s_inited) return;
 
+    // Session 1 of the P4 Meshtastic port: bring the LoRa radio up. The
+    // upper layers (battle / daycare / terminal) still see the stub for
+    // now — the LoRa wrapper just makes sure the C6 is on LongFast US
+    // 907.125 MHz and parked in RX, so we can already test wire-level
+    // traffic with `lora_send` / `lora_stats` from the terminal.
+    esp_err_t lora_err = meshtastic_lora_begin();
+    if (lora_err != ESP_OK) {
+        ESP_LOGW(TAG, "meshtastic_lora_begin failed (%s) — radio inert",
+                 esp_err_to_name(lora_err));
+    } else {
+        // Session 2a: spin up the Meshtastic protocol layer. The drainer
+        // task pulls raw bytes off meshtastic_lora's queue and parses the
+        // 16-byte header into a ring buffer that the terminal's
+        // `mesh_recent` command surfaces.
+        esp_err_t mp_err = meshtastic_proto_begin();
+        if (mp_err != ESP_OK) {
+            ESP_LOGW(TAG, "meshtastic_proto_begin failed (%s)",
+                     esp_err_to_name(mp_err));
+        }
+    }
+
     s_daycare.init();   // zero-init state, magic, partyCount=0 → tick() is a no-op until checkIn
 
     static uint8_t terminal_storage[sizeof(MatsuMonsterTerminal)] alignas(MatsuMonsterTerminal);
@@ -75,6 +101,14 @@ extern "C" void monster_init(pax_buf_t *fb, int canvas_w, int canvas_h,
     s_terminal->setRenderTarget(fb, canvas_w, canvas_h);
     s_terminal->setInputQueue(input_q);
     s_terminal->begin();
+
+    // Path #3 Session 5: full chat UI. Same placement-new trick as the
+    // terminal so we never call C++ static-init on a class that depends
+    // on canvas dims known only after BSP init.
+    static uint8_t chat_storage[sizeof(MeshtasticChatView)] alignas(MeshtasticChatView);
+    s_chat = new (chat_storage) MeshtasticChatView();
+    s_chat->setRenderTarget(fb, canvas_w, canvas_h);
+    s_chat->setInputQueue(input_q);
 
     s_inited = true;
     ESP_LOGI(TAG,
@@ -181,6 +215,65 @@ extern "C" bool monster_terminal_pump(void)
         mm_audio_resume();   // I2S DMA back online before unmuting
         audio_mute = 0;
         ESP_LOGI(TAG, "state -> EMULATOR");
+        return true;
+    }
+    return false;
+}
+
+// ── Path #3 Session 5: chat-mode plumbing ────────────────────────────
+
+extern "C" void monster_enter_chat(void)
+{
+    if (!s_inited || s_state == MONSTER_STATE_CHAT) return;
+    // Same SRAM-checkpoint discipline as monster_enter_terminal — the
+    // chat session can take arbitrary time and we don't want a power
+    // loss mid-session to drop in-emulator progress.
+    mm_sram_persist();
+
+    // From EMULATOR: stop audio. From TERMINAL: audio is already muted.
+    if (s_state == MONSTER_STATE_EMULATOR) {
+        audio_mute = 1;
+        mm_audio_pause();
+    }
+    s_state = MONSTER_STATE_CHAT;
+    if (s_chat) {
+        s_chat->clearExitFlag();
+        s_chat->clearTerminalJump();
+        s_chat->begin();
+    }
+    ESP_LOGI(TAG, "state -> CHAT");
+}
+
+extern "C" bool monster_chat_pump(void)
+{
+    if (!s_inited || !s_chat) return false;
+    if (s_state != MONSTER_STATE_CHAT) return false;
+
+    s_chat->handleInput();
+    s_chat->render();
+
+    // Fn+T from inside the chat: jump straight to the terminal without
+    // bouncing through emulator state. Same audio-mute regime carries
+    // over since both states keep the emulator paused.
+    if (s_chat->wantsTerminalJump()) {
+        s_chat->clearTerminalJump();
+        s_state = MONSTER_STATE_TERMINAL;
+        if (s_terminal) {
+            s_terminal->clearExitFlag();
+            s_terminal->prepareForReentry();
+            s_terminal->println("");
+            s_terminal->println("=== Switched from chat (Fn+T) ===");
+        }
+        ESP_LOGI(TAG, "state -> TERMINAL (from CHAT)");
+        return true;
+    }
+
+    if (s_chat->wantsToExit()) {
+        s_chat->clearExitFlag();
+        s_state    = MONSTER_STATE_EMULATOR;
+        mm_audio_resume();
+        audio_mute = 0;
+        ESP_LOGI(TAG, "state -> EMULATOR (from CHAT)");
         return true;
     }
     return false;

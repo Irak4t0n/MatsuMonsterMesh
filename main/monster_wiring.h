@@ -20,6 +20,7 @@ extern "C" {
 typedef enum {
     MONSTER_STATE_EMULATOR = 0,
     MONSTER_STATE_TERMINAL = 1,
+    MONSTER_STATE_CHAT     = 2,   // Path #3 Session 5: full Meshtastic chat UI
 } monster_state_t;
 
 // Construct radio + daycare + battle + terminal. Call once after BSP +
@@ -60,6 +61,18 @@ void monster_enter_terminal(void);
 // flips state back to MONSTER_STATE_EMULATOR + un-mutes audio.
 // Returns true if the state just transitioned back to emulator this frame.
 bool monster_terminal_pump(void);
+
+// Path #3 Session 5: full Meshtastic chat UI.
+//
+// Called by main.c when it detects Fn+M (from any state). Mutes audio
+// the same way `monster_enter_terminal` does and switches the state
+// machine; the next call to `monster_chat_pump` drives the chat frame.
+void monster_enter_chat(void);
+
+// Per-frame chat-mode pump. Drains the input queue, redraws if dirty,
+// and on exit flips state back to MONSTER_STATE_EMULATOR + un-mutes
+// audio. Returns true on the frame the state transitions back out.
+bool monster_chat_pump(void);
 
 #ifdef __cplusplus
 }

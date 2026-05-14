@@ -102,6 +102,20 @@ private:
     void cmdFight(const char *args);
     void cmdRun();
     void cmdCatch();
+    // Path #3 Session 1 — raw-LoRa bring-up smoke tests.
+    void cmdLoraSend(const char *args);
+    void cmdLoraStats();
+    void cmdLoraReinit();
+    void cmdLoraProbe();
+    // Path #3 Session 2a — Meshtastic protocol layer.
+    void cmdMeshRecent();
+    // Path #3 Session 2c — text-message-only view.
+    void cmdMeshMessages();
+    // Path #3 Session 2d — Meshtastic TX path.
+    void cmdMeshSend(const char *args);
+    void cmdMeshAnnounce(const char *args);
+    // Path #3 Session 3b — NodeDB view.
+    void cmdMeshNodes();
     void cmdQuit();
 
     // ── Internal helpers ────────────────────────────────────────────────────

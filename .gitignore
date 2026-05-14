@@ -1,4 +1,5 @@
 build/
+build_log*.txt
 tags
 main/kbelf_lib.c
 sdkconfig.old

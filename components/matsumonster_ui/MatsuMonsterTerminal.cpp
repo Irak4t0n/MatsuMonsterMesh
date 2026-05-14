@@ -42,6 +42,8 @@ static inline bool mm_restart_to_meshtastic(void) {
 #include "PokemonDaycare.h"
 #include "MonsterMeshTextBattle.h"
 #include "MeshtasticRadio.h"
+#include "meshtastic_lora.h"     // Path #3 smoke-test commands
+#include "meshtastic_proto.h"    // Path #3 Session 2a parsed-header view
 #include "emulator_sram_iface.h"
 #include "DaycareData.h"        // daycareSpeciesNames[]
 #include "DaycareSavPatcher.h"  // buildGen1Party
@@ -553,6 +555,15 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "fight",  &args))  cmdFight(args);
     else if (starts_with(cmd, "run",    &args))  cmdRun();
     else if (starts_with(cmd, "catch",  &args))  cmdCatch();
+    else if (starts_with(cmd, "lora_send",  &args)) cmdLoraSend(args);
+    else if (starts_with(cmd, "lora_stats", &args)) cmdLoraStats();
+    else if (starts_with(cmd, "lora_reinit", &args)) cmdLoraReinit();
+    else if (starts_with(cmd, "lora_probe", &args)) cmdLoraProbe();
+    else if (starts_with(cmd, "mesh_recent", &args)) cmdMeshRecent();
+    else if (starts_with(cmd, "mesh_messages", &args)) cmdMeshMessages();
+    else if (starts_with(cmd, "mesh_send", &args)) cmdMeshSend(args);
+    else if (starts_with(cmd, "mesh_announce", &args)) cmdMeshAnnounce(args);
+    else if (starts_with(cmd, "mesh_nodes", &args)) cmdMeshNodes();
     else if (starts_with(cmd, "quit",   &args))  cmdQuit();
     else if (starts_with(cmd, "exit",   &args))  cmdQuit();
     else if (starts_with(cmd, "help",   &args))  cmdHelp();
@@ -568,6 +579,15 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  fight <name>  — challenge a mesh neighbour by short name");
     println("  run           — start a local roguelike battle vs CPU");
     println("  catch         — try to catch the current wild Pokemon");
+    println("  lora_send <s> — send raw probe (≥8 chars) on LongFast US");
+    println("  lora_stats    — show LoRa init / TX / RX counters");
+    println("  lora_reinit   — retry LoRa bring-up (handy after startup race)");
+    println("  lora_probe    — exercise each LoRa primitive to find a bad one");
+    println("  mesh_recent   — last N parsed Meshtastic headers + decoded body");
+    println("  mesh_messages — text messages only, newest first");
+    println("  mesh_send <t> — broadcast text message <t> on LongFast");
+    println("  mesh_announce — broadcast NodeInfo (so T-Deck shows our name)");
+    println("  mesh_nodes    — list nodes we've heard NodeInfo from");
     println("  quit          — back to emulator");
 }
 
@@ -901,6 +921,289 @@ void MatsuMonsterTerminal::cmdCatch()
     xp_pending_ = false;
     battle_->exit();
     dirty_ = true;
+}
+
+// ── Path #3 Session 1 smoke-test commands ──────────────────────────────────
+//
+// `lora_send <text>` ships a raw byte payload over the air on LongFast US
+// 907.125 MHz. Other Meshtastic devices on the same channel will RECEIVE
+// it at the wire level — they won't decode it as a Meshtastic packet (we
+// don't have the protocol layer yet), but they may log "rx packet of N
+// bytes, decode failed" or similar, which is enough to prove the link.
+//
+// `lora_stats` prints counters: configs applied, TX attempted/ok/err,
+// RX packets/bytes. RX should increment whenever ANY other Meshtastic
+// device on LongFast US is transmitting nearby — useful for confirming
+// the radio is actually listening to live mesh traffic.
+
+void MatsuMonsterTerminal::cmdLoraSend(const char *args)
+{
+    if (!meshtastic_lora_is_up()) {
+        println("(lora_send: radio not up — meshtastic_lora_begin failed)");
+        return;
+    }
+    if (!args || !*args) {
+        println("Usage: lora_send <text>");
+        return;
+    }
+    size_t len = strlen(args);
+    if (len > 64) {
+        println("(lora_send: truncating to 64 bytes)");
+        len = 64;
+    }
+    esp_err_t err = meshtastic_lora_send_raw((const uint8_t *)args, len);
+    if (err == ESP_OK) {
+        printf_line("lora_send: %u bytes OK on 907.125 MHz", (unsigned)len);
+    } else {
+        printf_line("lora_send: FAILED (esp_err=%d)", (int)err);
+    }
+}
+
+void MatsuMonsterTerminal::cmdLoraStats()
+{
+    meshtastic_lora_stats_t s;
+    meshtastic_lora_get_stats(&s);
+    println("── LoRa stats ──");
+    printf_line("  init_ok        %u", (unsigned)s.init_ok);
+    printf_line("  configs        %u", (unsigned)s.configs_applied);
+    printf_line("  tx attempted   %u", (unsigned)s.tx_attempted);
+    printf_line("  tx ok          %u", (unsigned)s.tx_ok);
+    printf_line("  tx err         %u", (unsigned)s.tx_err);
+    printf_line("  rx packets     %u", (unsigned)s.rx_packets);
+    printf_line("  rx bytes total %u", (unsigned)s.rx_bytes_total);
+    println("── Diagnostics ──");
+    printf_line("  init_err=%d  ms=%u",  (int)s.last_init_err,
+                (unsigned)s.last_init_ms);
+    printf_line("  cfg_err=%d   ms=%u",  (int)s.last_config_err,
+                (unsigned)s.last_config_ms);
+    printf_line("  mode_err=%d  ms=%u",  (int)s.last_mode_err,
+                (unsigned)s.last_mode_ms);
+    printf_line("  tx_pre=%d tx=%d tx_post=%d  ms=%u",
+                (int)s.last_tx_pre_mode_err,
+                (int)s.last_tx_err,
+                (int)s.last_tx_post_mode_err,
+                (unsigned)s.last_tx_ms);
+}
+
+void MatsuMonsterTerminal::cmdLoraReinit()
+{
+    println("Retrying lora bring-up...");
+    esp_err_t err = meshtastic_lora_begin();
+    if (err == ESP_OK) {
+        println("lora_reinit: OK (radio now configured for LongFast US)");
+    } else {
+        printf_line("lora_reinit: FAILED (esp_err=%d)", (int)err);
+        println("(check `lora_stats` for last_*_err to see which call failed)");
+    }
+}
+
+void MatsuMonsterTerminal::cmdLoraProbe()
+{
+    println("Probing tanmatsu-lora primitives...");
+    meshtastic_lora_probe_result_t r;
+    meshtastic_lora_probe(&r);
+    for (int i = 0; i < r.probe_count; ++i) {
+        const char *verdict = (r.entries[i].result == 0) ? "OK" : "FAIL";
+        printf_line("  %-18s %s (%d)",
+                    r.entries[i].label, verdict,
+                    (int)r.entries[i].result);
+    }
+    if (r.cur_frequency > 0) {
+        println("── C6 current config ──");
+        printf_line("  freq    %u Hz",  (unsigned)r.cur_frequency);
+        printf_line("  SF      %u",     (unsigned)r.cur_sf);
+        printf_line("  BW      %u kHz", (unsigned)r.cur_bw);
+        printf_line("  CR      4/%u",   (unsigned)r.cur_cr);
+    } else {
+        println("(C6 didn't return a valid config — get_config failed)");
+    }
+}
+
+// ── Path #3 Session 2a — Meshtastic protocol view ───────────────────────────
+//
+// `mesh_recent` shows the most recent parsed packets. Each row is one
+// Meshtastic on-air packet broken down by 16-byte header fields. The
+// payload bytes are still encrypted (decryption lands in Session 2b),
+// but the plaintext header alone already tells us a lot: which other
+// node we heard, the LongFast channel hash, hop counts, and whether
+// our LoRa tuning is right.
+
+static const char *portnum_label(int p)
+{
+    switch (p) {
+        case MESHTASTIC_PORTNUM_TEXT_MESSAGE_APP: return "TextMessage";
+        case MESHTASTIC_PORTNUM_POSITION_APP:     return "Position";
+        case MESHTASTIC_PORTNUM_NODEINFO_APP:     return "NodeInfo";
+        case MESHTASTIC_PORTNUM_ROUTING_APP:      return "Routing";
+        case MESHTASTIC_PORTNUM_ADMIN_APP:        return "Admin";
+        case MESHTASTIC_PORTNUM_TELEMETRY_APP:    return "Telemetry";
+        case MESHTASTIC_PORTNUM_TRACEROUTE_APP:   return "Traceroute";
+        case MESHTASTIC_PORTNUM_UNKNOWN_APP:      return "Unknown";
+        default:                                  return NULL;
+    }
+}
+
+void MatsuMonsterTerminal::cmdMeshRecent()
+{
+    meshtastic_recent_entry_t entries[MESHTASTIC_RECENT_DEPTH];
+    size_t n = meshtastic_proto_recent(entries, MESHTASTIC_RECENT_DEPTH);
+    printf_line("── mesh_recent (parsed %u total) ──",
+                (unsigned)meshtastic_proto_total_parsed());
+    if (n == 0) {
+        println("(no packets yet — wait for T-Deck Plus to broadcast)");
+        return;
+    }
+    uint32_t now_ms_v = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    for (size_t i = 0; i < n; i++) {
+        const meshtastic_recent_entry_t &e = entries[i];
+        uint32_t age_s = (now_ms_v - e.rx_ms) / 1000u;
+        uint8_t  hl    = meshtastic_hdr_hop_limit(e.header.flags);
+        size_t   plen  = e.raw_len > MESHTASTIC_HEADER_LEN
+                             ? (size_t)e.raw_len - MESHTASTIC_HEADER_LEN : 0;
+
+        // Portnum / decrypt summary, same logic as before.
+        char portcol[24] = "—";
+        if (e.decrypted) {
+            if (e.portnum_guess >= 0) {
+                const char *lbl = portnum_label(e.portnum_guess);
+                if (lbl) {
+                    snprintf(portcol, sizeof(portcol), "%s(%d)",
+                             lbl, (int)e.portnum_guess);
+                } else {
+                    snprintf(portcol, sizeof(portcol), "Port%d",
+                             (int)e.portnum_guess);
+                }
+            } else if (e.plain_sample_len > 0) {
+                snprintf(portcol, sizeof(portcol), "?? (b0=%02x)",
+                         e.plain_sample[0]);
+            }
+        }
+
+        // Two-line-per-packet layout: header on row 1, decoded body on
+        // row 2 (only when we have one). Keeps both readable without
+        // running off the right edge of the terminal. NodeNum gets
+        // resolved through the NodeDB to a short name when known.
+        char who[16];
+        meshtastic_format_node(e.header.from, who, sizeof(who));
+        printf_line("[%us] %s  ch=%02x  hop=%u  plen=%u  %s",
+                    (unsigned)age_s,
+                    who,
+                    e.header.channel,
+                    hl,
+                    (unsigned)plen,
+                    portcol);
+        if (e.body[0] != '\0') {
+            printf_line("       %s", e.body);
+        }
+    }
+}
+
+void MatsuMonsterTerminal::cmdMeshMessages()
+{
+    meshtastic_recent_entry_t entries[MESHTASTIC_RECENT_DEPTH];
+    size_t n = meshtastic_proto_recent(entries, MESHTASTIC_RECENT_DEPTH);
+    println("── mesh_messages (text only) ──");
+    uint32_t now_ms_v = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    size_t shown = 0;
+    for (size_t i = 0; i < n; i++) {
+        const meshtastic_recent_entry_t &e = entries[i];
+        if (!e.decrypted)                                            continue;
+        if (e.portnum_guess != MESHTASTIC_PORTNUM_TEXT_MESSAGE_APP)  continue;
+        if (e.body[0] == '\0')                                       continue;
+        uint32_t age_s = (now_ms_v - e.rx_ms) / 1000u;
+        char who[16];
+        meshtastic_format_node(e.header.from, who, sizeof(who));
+        printf_line("[%us] %s: %s", (unsigned)age_s, who, e.body);
+        shown++;
+    }
+    if (shown == 0) {
+        println("(no text messages heard yet)");
+    }
+}
+
+void MatsuMonsterTerminal::cmdMeshNodes()
+{
+    meshtastic_node_entry_t nodes[MESHTASTIC_NODEDB_CAP];
+    size_t n = meshtastic_nodedb_snapshot(nodes, MESHTASTIC_NODEDB_CAP);
+    printf_line("── mesh_nodes (%u known) ──", (unsigned)n);
+    if (n == 0) {
+        println("(no nodes seen yet)");
+        return;
+    }
+    uint32_t now_ms_v = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    uint32_t my_id    = meshtastic_proto_node_id();
+    for (size_t i = 0; i < n; i++) {
+        const meshtastic_node_entry_t &e = nodes[i];
+        uint32_t age_s = (now_ms_v - e.last_seen_ms) / 1000u;
+        const char *me  = (e.node_num == my_id) ? "* " : "  ";
+        printf_line("%s!%08lx  %-7s  %-16s  age=%us",
+                    me,
+                    (unsigned long)e.node_num,
+                    e.short_name[0] ? e.short_name : "(no-short)",
+                    e.long_name[0]  ? e.long_name  : "(no-long)",
+                    (unsigned)age_s);
+    }
+    println("(* = us)");
+}
+
+// ── Path #3 Session 2d — Meshtastic TX commands ─────────────────────────────
+
+void MatsuMonsterTerminal::cmdMeshSend(const char *args)
+{
+    if (!meshtastic_lora_is_up()) {
+        println("(mesh_send: radio not up)");
+        return;
+    }
+    if (!args || !*args) {
+        println("Usage: mesh_send <text>");
+        return;
+    }
+    esp_err_t err = meshtastic_send_text(args);
+    if (err == ESP_OK) {
+        printf_line("mesh_send: \"%s\" sent as !%08lx",
+                    args, (unsigned long)meshtastic_proto_node_id());
+    } else {
+        printf_line("mesh_send: FAILED (%s)", esp_err_to_name(err));
+    }
+}
+
+void MatsuMonsterTerminal::cmdMeshAnnounce(const char *args)
+{
+    if (!meshtastic_lora_is_up()) {
+        println("(mesh_announce: radio not up)");
+        return;
+    }
+    // Optional override: `mesh_announce <long> <short>`. If args is
+    // empty, the proto layer fills in the compile-time defaults.
+    const char *long_name  = nullptr;
+    const char *short_name = nullptr;
+    // Simplest possible split — find the last space; everything before
+    // is long_name, everything after is short_name. Works for the
+    // single-token case (no space → no short override) too.
+    char long_buf[32]  = {0};
+    char short_buf[12] = {0};
+    if (args && *args) {
+        const char *sp = strrchr(args, ' ');
+        if (sp && sp != args) {
+            size_t llen = (size_t)(sp - args);
+            if (llen >= sizeof(long_buf)) llen = sizeof(long_buf) - 1;
+            memcpy(long_buf, args, llen);
+            long_buf[llen] = '\0';
+            strncpy(short_buf, sp + 1, sizeof(short_buf) - 1);
+            long_name  = long_buf;
+            short_name = short_buf;
+        } else {
+            strncpy(long_buf, args, sizeof(long_buf) - 1);
+            long_name = long_buf;
+        }
+    }
+    esp_err_t err = meshtastic_send_nodeinfo(long_name, short_name);
+    if (err == ESP_OK) {
+        printf_line("mesh_announce: NodeInfo sent as !%08lx",
+                    (unsigned long)meshtastic_proto_node_id());
+    } else {
+        printf_line("mesh_announce: FAILED (%s)", esp_err_to_name(err));
+    }
 }
 
 void MatsuMonsterTerminal::cmdQuit()

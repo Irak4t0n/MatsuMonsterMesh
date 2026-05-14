@@ -1,6 +1,20 @@
 dependencies:
   idf: ">=5.5.1"
   badgeteam/badge-bsp: ">=0.9.0"
-  badgeteam/appfs: ">=1.0.1"           # for Alt+M → reboot into Meshtastic UI app
+  badgeteam/appfs: ">=1.0.1"                # Alt+M → reboot into Meshtastic UI app
   nicolaielectronics/tanmatsu-wifi: "^1.1.2"
+  # tanmatsu-lora 0.0.1 is the version that matches the C6's tanmatsu-radio
+  # v2.0.0 firmware on-device. 0.1.x switches to a newer esp-hosted custom-RPC
+  # API that the C6 firmware doesn't yet handle (responds RPC_ERR_UNSUPPORTED_MSG,
+  # ESP_ERR_NOT_SUPPORTED = 262). meshcore — the working reference app — pins
+  # to 0.0.1, so we do too. Once Nicolai-Electronics ships a newer
+  # tanmatsu-radio firmware that handles the 0.1.x API, we can bump.
+  nicolaielectronics/tanmatsu-lora: "0.0.1"
+  # esp-hosted-tanmatsu 1.0.0 still ships `esp_hosted_custom.h` (the older
+  # `esp_hosted_set_custom_callback` single-callback API that tanmatsu-lora
+  # 0.0.1 uses). The 2.12.x line drops that header in favour of per-msg_id
+  # `esp_hosted_register_custom_callback`. tanmatsu-wifi 1.1.2 is
+  # compatible with esp-hosted >=1.0.0, so this downgrade doesn't break
+  # the WiFi stack.
+  nicolaielectronics/esp-hosted-tanmatsu: "1.0.0"
   robotman2412/pax-gfx: "^2.0.6"

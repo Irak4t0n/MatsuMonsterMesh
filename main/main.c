@@ -687,6 +687,23 @@ void doevents(void) {
         return;
     }
 
+    // Path #3 Session 5: full Meshtastic chat UI runs the same way.
+    // monster_chat_pump() returns true on the frame the chat exits, which
+    // may be back to MONSTER_STATE_EMULATOR (Esc) or jumped to
+    // MONSTER_STATE_TERMINAL (Fn+T inside chat). In the latter case we
+    // drop out of THIS loop and the next frame's state check will hit
+    // the terminal dispatch above.
+    if (monster_get_state() == MONSTER_STATE_CHAT) {
+        for (int i = 0; i < 8; i++) {
+            pad_set(key_pads[i], 0);
+            if (i < 4) key_release_time[i] = 0;
+        }
+        while (!monster_chat_pump()) {
+            vTaskDelay(pdMS_TO_TICKS(16));
+        }
+        return;
+    }
+
     // Auto-release timed keys
     uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
     for (int i = 0; i < 4; i++) {
@@ -938,6 +955,14 @@ void doevents(void) {
                 monster_enter_terminal();
                 continue;
             }
+            // Fn+M → enter the Meshtastic chat UI (Path #3 Session 5).
+            // Same dispatch pattern as Fn+T; chat view handles its own
+            // input + render loop until the user Escs back.
+            if ((event.args_keyboard.modifiers & BSP_INPUT_MODIFIER_FUNCTION) &&
+                (event.args_keyboard.ascii == 'm' || event.args_keyboard.ascii == 'M')) {
+                monster_enter_chat();
+                continue;
+            }
             // Alt+M → reboot into the Tanmatsu Meshtastic UI app.
             // Same idea as F1 → launcher, except we set the AppFS bootsel
             // to the Meshtastic app instead of clearing it. If the user
@@ -1055,10 +1080,11 @@ void blit_task(void *arg) {
     for (;;) {
         xSemaphoreTake(sem_frame_ready, portMAX_DELAY);
 
-        // While the MonsterMesh terminal owns the screen, drain the
-        // ping-pong semaphore but don't push pixels — terminal renders
-        // straight to the display from doevents().
-        if (monster_get_state() == MONSTER_STATE_TERMINAL) {
+        // While the MonsterMesh terminal or chat owns the screen, drain
+        // the ping-pong semaphore but don't push pixels — those modes
+        // render straight to the display from doevents().
+        monster_state_t st = monster_get_state();
+        if (st == MONSTER_STATE_TERMINAL || st == MONSTER_STATE_CHAT) {
             xSemaphoreGive(sem_frame_done);
             continue;
         }
@@ -1339,6 +1365,15 @@ void app_main(void) {
     };
     res = bsp_device_initialize(&bsp_configuration);
     if (res != ESP_OK) { ESP_LOGE(TAG, "BSP init failed: %d", res); return; }
+
+    // NOTE on radio init: the matching `tanmatsu-lora 0.0.1` + older
+    // `esp-hosted-tanmatsu` versions we now pin to in main/idf_component.yml
+    // use the same custom-event API as the C6's `tanmatsu-radio v2.0.0`
+    // firmware on-device. No explicit re-handshake call is needed (the
+    // reference meshcore app calls neither `esp_hosted_connect_to_slave`
+    // nor `esp_hosted_deinit/init`). If a future C6 firmware update
+    // switches to the newer custom-RPC API, we'd bump tanmatsu-lora to
+    // ^0.1.x and may need `esp_hosted_connect_to_slave()` here.
 
     res = bsp_display_get_parameters(&display_h_res, &display_v_res,
                                       &display_color_format, &display_data_endian);
