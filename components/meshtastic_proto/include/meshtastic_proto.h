@@ -325,6 +325,10 @@ size_t meshtastic_proto_recent(meshtastic_recent_entry_t *out, size_t max_out);
 // for the terminal's `lora_stats` summary.
 uint32_t meshtastic_proto_total_parsed(void);
 
+// Total number of packets the drainer has flood-relayed since begin().
+// Session 3d — useful for verifying relay behaviour on hardware.
+uint32_t meshtastic_proto_total_relayed(void);
+
 #ifdef __cplusplus
 }
 #endif

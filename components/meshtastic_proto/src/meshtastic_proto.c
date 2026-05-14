@@ -259,6 +259,31 @@ static bool chat_dedup_check_locked(uint32_t pkt_id)
     return false;
 }
 
+// ── Relay dedup (Session 3d) ─────────────────────────────────────────
+//
+// Separate from chat dedup — tracks ALL packet IDs (not just TextMessage)
+// to prevent relay loops in flood routing. Every received packet's ID is
+// recorded here; if a duplicate arrives later, we skip relaying it.
+// 64 entries covers several minutes of typical LongFast traffic.
+//
+// NOT mutex-protected — only the drain task reads/writes this.
+#define RELAY_DEDUP_DEPTH 64
+static uint32_t s_relay_dedup[RELAY_DEDUP_DEPTH];
+static int      s_relay_dedup_pos = 0;
+static uint32_t s_relay_sent      = 0;
+
+// Returns true if `pkt_id` has been seen recently. Otherwise records it.
+static bool relay_dedup_check(uint32_t pkt_id)
+{
+    if (pkt_id == 0) return false;
+    for (int i = 0; i < RELAY_DEDUP_DEPTH; i++) {
+        if (s_relay_dedup[i] == pkt_id) return true;
+    }
+    s_relay_dedup[s_relay_dedup_pos] = pkt_id;
+    s_relay_dedup_pos = (s_relay_dedup_pos + 1) % RELAY_DEDUP_DEPTH;
+    return false;
+}
+
 // Push a text message into the chat ring. Skips if `pkt_id` was seen
 // recently (relay copy of the same packet). Truncates oversized text.
 // Safe to call from any task.
@@ -752,6 +777,13 @@ static void drain_task(void *arg)
                          esp_err_to_name(perr), (unsigned)raw_len);
                 continue;
             }
+
+            // Session 3d: record this packet ID in the relay dedup ring
+            // EARLY — before any processing — so a second copy of the
+            // same packet (arriving via a different relay path) is
+            // suppressed even if we haven't finished processing the first.
+            bool relay_already_seen = relay_dedup_check(entry.header.id);
+
             size_t payload_off = MESHTASTIC_HEADER_LEN;
             size_t payload_len = (raw_len > payload_off) ? (raw_len - payload_off) : 0;
             size_t sample      = payload_len < MESHTASTIC_RECENT_PAYLOAD_SAMPLE
@@ -858,6 +890,53 @@ static void drain_task(void *arg)
                      entry.body);
 
             push_entry(&entry);
+
+            // ── Session 3d: flood relay ──────────────────────────────
+            //
+            // If this packet is from another node, hasn't been seen
+            // before, and still has hops remaining, re-broadcast it so
+            // nodes beyond our direct RF reach can receive it. This is
+            // the standard Meshtastic flood-routing behaviour.
+            //
+            // The raw on-air bytes are retransmitted as-is — the
+            // encrypted payload is NOT re-encrypted. Only two header
+            // fields change:
+            //   flags byte 12: hop_limit decremented by 1
+            //   byte 15:       relay_node set to our low node-ID byte
+            //
+            // A random delay (100-500 ms) before TX reduces collision
+            // probability when multiple relayers hear the same packet.
+            {
+                uint8_t hop_limit = meshtastic_hdr_hop_limit(entry.header.flags);
+                if (!relay_already_seen &&
+                    entry.header.from != meshtastic_proto_node_id() &&
+                    hop_limit > 0) {
+
+                    uint32_t delay_ms = 100 + (esp_random() % 400);
+                    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+
+                    uint8_t relay_pkt[ML_RAW_MAX_LEN];
+                    memcpy(relay_pkt, raw, raw_len);
+
+                    uint8_t new_hop = hop_limit - 1;
+                    relay_pkt[12] = (entry.header.flags & 0xF8) | (new_hop & 0x07);
+                    relay_pkt[15] = (uint8_t)(meshtastic_proto_node_id() & 0xFF);
+
+                    esp_err_t relay_err = meshtastic_lora_send_raw(relay_pkt, raw_len);
+                    if (relay_err == ESP_OK) {
+                        s_relay_sent++;
+                        ESP_LOGI(TAG,
+                                 "relay from=!%08lx id=%08lx hop=%u->%u delay=%ums",
+                                 (unsigned long)entry.header.from,
+                                 (unsigned long)entry.header.id,
+                                 (unsigned)hop_limit, (unsigned)new_hop,
+                                 (unsigned)delay_ms);
+                    } else {
+                        ESP_LOGW(TAG, "relay send failed: %s",
+                                 esp_err_to_name(relay_err));
+                    }
+                }
+            }
         } else {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
@@ -970,4 +1049,10 @@ uint32_t meshtastic_proto_total_parsed(void)
     uint32_t v = s_total_parsed;
     xSemaphoreGive(s_ring_mtx);
     return v;
+}
+
+uint32_t meshtastic_proto_total_relayed(void)
+{
+    // Single-writer (drain task), 32-bit atomic read on ESP32 — no mutex.
+    return s_relay_sent;
 }

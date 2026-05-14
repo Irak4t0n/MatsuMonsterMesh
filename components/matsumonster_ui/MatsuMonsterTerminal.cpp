@@ -971,6 +971,7 @@ void MatsuMonsterTerminal::cmdLoraStats()
     printf_line("  tx err         %u", (unsigned)s.tx_err);
     printf_line("  rx packets     %u", (unsigned)s.rx_packets);
     printf_line("  rx bytes total %u", (unsigned)s.rx_bytes_total);
+    printf_line("  relay sent     %u", (unsigned)meshtastic_proto_total_relayed());
     println("── Diagnostics ──");
     printf_line("  init_err=%d  ms=%u",  (int)s.last_init_err,
                 (unsigned)s.last_init_ms);
