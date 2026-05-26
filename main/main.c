@@ -75,8 +75,8 @@ static const char TAG[] = "howboymatsu";
 // ── Display globals ───────────────────────────────────────────────────────────
 static size_t                       display_h_res        = 0;
 static size_t                       display_v_res        = 0;
-static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
-static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
+static bsp_display_color_format_t   display_color_format = BSP_DISPLAY_COLOR_FORMAT_16_565RGB;
+static bsp_display_endianness_t     display_data_endian  = BSP_DISPLAY_ENDIAN_LITTLE;
 pax_buf_t                           fb_pax               = {0};
 QueueHandle_t                       input_event_queue    = NULL;
 
@@ -718,15 +718,21 @@ void doevents(void) {
         }
     }
 
-    // WASD layout: poll scancode state each frame for accurate hold/release
-    if (key_layout == 1 && !layout_menu_open) {
+    // Poll A/B button scancodes every frame — immune to key-repeat char events
+    if (!layout_menu_open) {
         bool st;
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_W,         &st); pad_set(PAD_UP,    (int)st);
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_S,         &st); pad_set(PAD_DOWN,  (int)st);
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_A,         &st); pad_set(PAD_LEFT,  (int)st);
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_D,         &st); pad_set(PAD_RIGHT, (int)st);
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_SEMICOLON, &st); pad_set(PAD_A,     (int)st);
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_LEFTBRACE, &st); pad_set(PAD_B,     (int)st);
+        if (key_layout == 1) {
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_W,         &st); pad_set(PAD_UP,    (int)st);
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_S,         &st); pad_set(PAD_DOWN,  (int)st);
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_A,         &st); pad_set(PAD_LEFT,  (int)st);
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_D,         &st); pad_set(PAD_RIGHT, (int)st);
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_SEMICOLON, &st); pad_set(PAD_A,     (int)st);
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_LEFTBRACE, &st); pad_set(PAD_B,     (int)st);
+        } else {
+            // Default layout: A and D scancodes for PAD_A/PAD_B — hold-accurate, no repeat flicker
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_A, &st); pad_set(PAD_A, (int)st);
+            bsp_input_read_scancode(BSP_INPUT_SCANCODE_D, &st); pad_set(PAD_B, (int)st);
+        }
     }
 
     while (xQueueReceive(input_event_queue, &event, 0) == pdTRUE) {
@@ -1006,23 +1012,13 @@ void doevents(void) {
                 }
                 continue;
             }
+            // A/B are handled by scancode polling — only START, SELECT, and system keys here
             uint32_t release_at = now + 100;
-            if (key_layout == 0) {
-                switch (event.args_keyboard.ascii) {
-                    case 'a': case 'A': pad_set(PAD_A, 1);      key_release_time[0] = release_at; break;
-                    case 'd': case 'D': pad_set(PAD_B, 1);      key_release_time[1] = release_at; break;
-                    case '\n': case '\r': pad_set(PAD_START, 1); key_release_time[2] = release_at; break;
-                    case ' ':           pad_set(PAD_SELECT, 1); key_release_time[3] = release_at; break;
-                    case '\b': case 127: save_sram_and_return_selector(); break;
-                    default: break;
-                }
-            } else {
-                switch (event.args_keyboard.ascii) {
-                    case '\n': case '\r': pad_set(PAD_START, 1);  key_release_time[2] = release_at; break;
-                    case ' ':            pad_set(PAD_SELECT, 1); key_release_time[3] = release_at; break;
-                    case '\b': case 127: save_sram_and_return_selector(); break;
-                    default: break;
-                }
+            switch (event.args_keyboard.ascii) {
+                case '\n': case '\r': pad_set(PAD_START, 1);  key_release_time[2] = release_at; break;
+                case ' ':            pad_set(PAD_SELECT, 1); key_release_time[3] = release_at; break;
+                case '\b': case 127: save_sram_and_return_selector(); break;
+                default: break;
             }
         }
     }
@@ -1367,7 +1363,7 @@ void app_main(void) {
 
     const bsp_configuration_t bsp_configuration = {
         .display = {
-            .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
+            .requested_color_format = BSP_DISPLAY_COLOR_FORMAT_16_565RGB,
             .num_fbs = 1,
         },
     };
@@ -1387,7 +1383,7 @@ void app_main(void) {
                                       &display_color_format, &display_data_endian);
     if (res != ESP_OK) { ESP_LOGE(TAG, "Display params failed: %d", res); return; }
 
-    pax_buf_type_t format = (display_color_format == LCD_COLOR_PIXEL_FORMAT_RGB565)
+    pax_buf_type_t format = (display_color_format == BSP_DISPLAY_COLOR_FORMAT_16_565RGB)
                             ? PAX_BUF_16_565RGB : PAX_BUF_24_888RGB;
 
     bsp_display_rotation_t display_rotation = BSP_DISPLAY_ROTATION_90;
@@ -1399,7 +1395,7 @@ void app_main(void) {
         default: break;
     }
     pax_buf_init(&fb_pax, NULL, display_h_res, display_v_res, format);
-    pax_buf_reversed(&fb_pax, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
+    pax_buf_reversed(&fb_pax, display_data_endian == BSP_DISPLAY_ENDIAN_BIG);
     pax_buf_set_orientation(&fb_pax, orientation);
 
     ESP_ERROR_CHECK(bsp_input_get_queue(&input_event_queue));

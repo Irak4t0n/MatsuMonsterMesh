@@ -10,21 +10,9 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
-#include "esp_hosted_custom.h"   // esp_hosted_set_custom_callback / send_custom —
-                                 // the old-API path that tanmatsu-lora 0.0.1
-                                 // sends through. We MUST register our own
-                                 // dispatcher (radio_callback below) before
-                                 // any tanmatsu-lora call — without it, the
-                                 // P4-side send path returns 1 (no route).
 #include "esp_hosted.h"          // esp_hosted_connect_to_slave — force the
                                  // SDIO transport to (re)handshake the C6 once
-                                 // the BSP is up. The constructor-time
-                                 // esp_hosted_init() that runs before app_main
-                                 // tried to power-cycle the radio via the BSP
-                                 // already, but bsp_power_set_radio_state()
-                                 // fails silently because the coprocessor
-                                 // handle is NULL pre-bsp_device_initialize.
-                                 // We have to redo that step here.
+                                 // the BSP is up.
 #include "bsp/power.h"           // bsp_power_set_radio_state for the actual
                                  // C6 power-cycle. The launcher kills C6
                                  // power right before AppFS-chaining to us,
@@ -57,31 +45,6 @@ typedef struct {
     uint8_t length;
     uint8_t data[ML_RAW_MAX_LEN];
 } raw_out_t;
-
-// esp-hosted custom-data callback. Fires whenever the C6 emits a custom
-// event back to us via its `generate_custom_event(ESP_PRIV_EVENT_LORA, ...)`
-// path. The launcher's reference flow (and meshcore's, and the Meshtastic
-// Tanmatsu UI's) dispatches type==1 (ESP_PRIV_EVENT_LORA) into
-// `lora_transaction_receive`, which feeds tanmatsu-lora's transaction
-// semaphore so synchronous calls like `lora_set_config` can complete.
-//
-// Registering this is mandatory — without it, tanmatsu-lora's transaction
-// layer has no way to deliver responses, and `esp_hosted_send_custom` itself
-// reports failure (returns 1) because no recipient is configured.
-static void mlora_custom_callback(uint8_t type, uint8_t *payload,
-                                  uint16_t payload_length)
-{
-    if (type == 1) {
-        // type 1 = ESP_PRIV_EVENT_LORA — packet from the C6's lora_protocol
-        // server (either a SET_CONFIG ack/nack, GET_STATUS reply, or an
-        // inbound PACKET_RX). tanmatsu-lora's receive function routes it
-        // either into the response-buffer (for sync calls) or onto the
-        // rx packet queue.
-        lora_transaction_receive(payload, payload_length);
-    }
-    // Other event types (badgelink, echo, init) are ignored here — they
-    // belong to other subsystems and we never asked for them.
-}
 
 static void rx_task(void *arg)
 {
@@ -180,22 +143,8 @@ esp_err_t meshtastic_lora_begin(void)
             return tr_err;
         }
 
-        // Register the esp-hosted custom-data callback FIRST — before
-        // lora_init, before any lora_* call. Without this, the P4-side
-        // `esp_hosted_send_custom(1, ...)` has no receive-side handler
-        // bound and bails out with return code 1 (no route). This is the
-        // step meshcore / tanmatsu-meshtastic-ui / the launcher all do
-        // explicitly before lora_init — it's not done internally by
-        // tanmatsu-lora 0.0.1.
-        esp_err_t cb_err = esp_hosted_set_custom_callback(mlora_custom_callback);
-        if (cb_err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_hosted_set_custom_callback: %s",
-                     esp_err_to_name(cb_err));
-            s_stats.last_init_err = (int32_t)cb_err;
-            return cb_err;
-        }
-        ESP_LOGI(TAG, "esp_hosted custom callback registered");
-
+        // tanmatsu-lora v0.1.1+ registers the esp-hosted custom callback
+        // internally in lora_init(), so we no longer need to do it here.
         esp_err_t init_err = lora_init(RX_QUEUE_DEPTH);
         s_stats.last_init_err = (int32_t)init_err;
         s_stats.last_init_ms  = now_ms();

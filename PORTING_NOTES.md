@@ -4,24 +4,36 @@ This file tracks open work that needs hardware testing or design input
 before it can be closed. None of these block the current `idf.py build`
 or the emulator-only path.
 
+## Resolved
+
+### ~~1. Real radio transport~~ ✓ (Session 4)
+
+Live LoRa radio is working via `LoRaMeshtasticRadio` → tanmatsu-lora →
+SDIO → C6. TX and RX verified on hardware.
+
+### ~~2. Daycare ↔ radio callbacks~~ ✓ (Session 4)
+
+`setSendDm` / `setBroadcast` / `setSendBeacon` are wired in
+`monster_wiring.cpp` and route through the live LoRa radio.
+
+### ~~3. Auto check-in from emulator save~~ ✓ (Session 4)
+
+`daycare.checkIn()` is called on ROM load with the Meshtastic short
+name. Party is parsed from SRAM automatically.
+
+### ~~4. C6 LoRa TX timeout~~ ✓ (Session 7)
+
+Renze (Nicolai Electronics) fixed the C6 tanmatsu-radio firmware to
+calculate dynamic TX timeouts based on actual packet airtime instead of
+the old hardcoded ~1s. Full 121-byte DaycareBeacon (all 6 pokemon)
+transmits successfully at SF11/BW250 (LongFast).
+
+Requires: tanmatsu-radio >= v2.1.0 (commits e17c642, a66ef5d),
+tanmatsu-lora >= v0.1.1, esp-hosted-tanmatsu >= v2.12.3.
+
 ## Hardware-side TODOs
 
-### 1. Real radio transport
-
-`SerialMeshtasticRadio` is still a logging stub —
-[`components/meshtastic_radio/meshtastic_radio_serial.cpp`](components/meshtastic_radio/meshtastic_radio_serial.cpp)
-has a block comment laying out the three SDIO/EPPP options. Per project
-guidance we'll address this in a later pass once we can iterate on
-hardware with the C6 already running Meshtastic.
-
-### 2. Daycare ↔ radio callbacks
-
-`PokemonDaycare::setSendDm` / `setBroadcast` / `setSendBeacon` aren't wired
-yet. With the stub radio they'd just log; once the radio is real, register
-lambdas (or thunks, since this is C ABI) that route to
-`MeshtasticRadio::sendPacket`.
-
-### 3. `Gen1Party` mapping from daycare/SRAM
+### 1. `Gen1Party` mapping from daycare/SRAM
 
 `cmdFight` and `cmdRun` in the terminal use a placeholder party
 (`count=1`, only `species[0]` populated). The full mapping (Gen 1 EV/DV
@@ -29,14 +41,7 @@ bytes from SRAM → `Gen1Pokemon` stat fields) needs to be written —
 straightforward but tedious. The wire path through `MeshtasticRadio` is
 exercised correctly even with the placeholder.
 
-### 4. Auto check-in from emulator save
-
-`daycare.checkIn(sram_iface, shortName, gameName)` is never called from
-`main.c` yet — until it is, `getState().partyCount == 0` and `tick()` is
-a no-op. A future iteration could hook this off a Pokémon-save-detection
-routine in the running ROM.
-
-### 5. SRAM bank validity
+### 2. SRAM bank validity
 
 `gnuboy_sram_init()` points at `ram.sbank`, which is allocated by
 `sram_load()`. If a ROM has no battery RAM (e.g. Tetris), `ram.sbank` may

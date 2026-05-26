@@ -45,10 +45,10 @@ This builds for the **Tanmatsu** handheld (a.k.a. Konsool):
 - **SoC**: ESP32-P4 (RISC-V, dual-core), with PSRAM enabled at 200 MHz.
   PSRAM size depends on board revision — see Nicolai Electronics' product
   page for definitive specs.
-- **Radio**: ESP32-C6 coprocessor, expected to be running Meshtastic
-  firmware (flashed via the Tanmatsu recovery tool). Communicates with
-  the P4 over a 4-bit SDIO bus — see [PORTING_NOTES.md](PORTING_NOTES.md)
-  for the radio transport status.
+- **Radio**: ESP32-C6 coprocessor running tanmatsu-radio firmware
+  (>= v2.1.0) with esp-hosted v2.12.3. Communicates with the P4 over
+  a 4-bit SDIO bus. LoRa TX/RX fully working including large packets
+  (145+ bytes at SF11/BW250 LongFast).
 - **Display**: ST7701-driven MIPI-DSI LCD, 480×800 native portrait;
   HowBoyMatsu (and this firmware) rotate 90° CW to render in 800×480
   landscape.
@@ -125,7 +125,7 @@ idf.py -B build/tanmatsu \
 
 The build target uses partition table [`partition_tables/16M.csv`](partition_tables/16M.csv)
 (2 MB app partition, 8 MB AppFS, 4 MB FAT). At v0.1.0 the firmware is
-**~1.0 MB (1013 KB)** — about half the app partition is free.
+**~1.2 MB (1188 KB)** — about 42% of the app partition is free.
 
 Other supported `DEVICE=` targets (inherited from the badgeteam template,
 not currently exercised by this port): `konsool`, `esp32-p4-function-ev-board`,

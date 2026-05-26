@@ -52,7 +52,7 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
                                               const Gen1Pokemon &src,
                                               const uint8_t nick[11])
 {
-    memset(&dst, 0, sizeof(dst));
+    dst = {};
     dst.species = src.species;
     if (nick) memcpy(dst.nickname, nick, 10);
     dst.nickname[10] = 0;
@@ -92,7 +92,7 @@ void Gen1BattleEngine::initBattlePokeFromBase(BattlePoke &dst,
                                               uint8_t species, uint8_t level,
                                               const uint8_t moves[4])
 {
-    memset(&dst, 0, sizeof(dst));
+    dst = {};
     dst.species = species;
     dst.level   = level;
     const Gen1BaseStats &b = GEN1_BASE_STATS[species < 152 ? species : 0];
@@ -129,7 +129,7 @@ void Gen1BattleEngine::start(const Gen1Party &p1, const Gen1Party &p2,
 
     auto initSide = [&](uint8_t side, const Gen1Party &pty) {
         BattleParty &bp = p_[side];
-        memset(&bp, 0, sizeof(bp));
+        bp = {};
         bp.count = pty.count > MAX_PARTY ? MAX_PARTY : pty.count;
         for (uint8_t i = 0; i < bp.count; ++i) {
             initBattlePokeFromSave(bp.mons[i], pty.mons[i], pty.nicknames[i]);
