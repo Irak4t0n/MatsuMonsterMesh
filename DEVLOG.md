@@ -9,6 +9,81 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 27 2026 — Fix T-Deck interop: encryption + full-size beacon (Session 8)
+
+### Goal
+Make the Tanmatsu and T-Deck MonsterMesh devices see each other's daycare
+beacons bidirectionally over LoRa mesh.
+
+### Bugs Fixed
+
+**1. PRIVATE_APP portnum (256) rejected on RX**
+
+`meshtastic_guess_portnum()` in `meshtastic_proto.c` only decoded 1-byte
+protobuf varints. PRIVATE_APP (portnum 256) encodes as `0x80 0x02`
+(2-byte varint), which was rejected with `portnum=-1`. ALL incoming
+PRIVATE_APP packets were silently dropped since Session 4.
+
+Fix: added multi-byte varint decoding (up to 2 bytes, covers portnums
+0–16383).
+
+**2. Wrong encryption channel**
+
+Tanmatsu sent daycare beacons unencrypted on ch=0x00 (PSK=0). The T-Deck
+MonsterMesh uses the "MonsterMesh" channel with PSK="MonsterMesh!2024"
+(16 bytes, base64 `TW9uc3Rlck1lc2ghMjAyNA==`), channel hash 0x25.
+
+Fix: added `MESHTASTIC_MM_KEY` and `send_data_frame_mm()` which encrypts
+with AES-128-CTR using the MonsterMesh key and sets ch=0x25 in the
+header. RX drain task now tries 3-key fallback: LongFast → MonsterMesh →
+plaintext.
+
+Channel hash computation: `XOR(channel_name_bytes) ^ XOR(PSK_key_bytes)`.
+"MonsterMesh" XOR=0x6F, key XOR=0x4A → 0x25.
+
+**3. Undersized beacon rejected by T-Deck**
+
+Tanmatsu sent variable-length beacons (e.g. 36 bytes for 1 pokemon). The
+upstream T-Deck MonsterMesh checks `payload_len >= sizeof(DaycareBeacon)`
+(122 bytes) and silently drops anything smaller.
+
+Fix: always send `sizeof(DaycareBeacon)` (122 bytes) with empty pokemon
+slots zero-initialized. Also added `uint8_t ngPlusTier` field at the end
+of `DaycareBeacon` to match the upstream struct from
+`GoatsAndMonkeys/monster_mesh`.
+
+### Other Changes
+
+- `status` terminal command now lists daycare neighbor details: short
+  name, game name, lead pokemon species/level, and party count
+- Added diagnostic hex dump (80 bytes) and parsed beacon logging in
+  `monster_daycare_tick()` for PRIVATE_APP packet analysis
+
+### Results
+
+Bidirectional daycare beacon exchange verified on hardware:
+- Tanmatsu receives T-Deck beacons: `PRIVATE(123)` → parsed correctly
+  (e.g. HTP1 playing Pokemon Yellow with Pikachu lv43, Nidoran? lv19,
+  Caterpie lv33, Pidgeotto lv25)
+- T-Deck receives Tanmatsu beacons: `PRIVATE(122)` → accepted
+- `status` command shows neighbors with names and pokemon
+
+### Files Changed
+- `components/meshtastic_proto/src/meshtastic_proto.c` — varint fix,
+  MM key, `aes128_ctr_crypt()`, `send_data_frame_mm()`, 3-key RX fallback
+- `components/meshtastic_proto/include/meshtastic_proto.h` — new API
+  declarations
+- `components/monster_core/DaycareTypes.h` — `ngPlusTier` field
+- `main/monster_wiring.cpp` — full-size beacon TX, diagnostic logging
+- `components/matsumonster_ui/MatsuMonsterTerminal.cpp` — neighbor
+  details in `status`
+- `components/meshtastic_radio/meshtastic_radio_lora.cpp` — minor
+- `components/monster_core/MonsterMeshTextBattle.cpp/.h` — minor
+- `components/monster_core/DaycareSavPatcher.h` — minor
+- `PORTING_NOTES.md` — marked T-Deck interop as resolved
+
+---
+
 ## Session May 14 2026 — Send full party + remove C6 TX workarounds (Session 6)
 
 ### Goal

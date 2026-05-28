@@ -7,11 +7,11 @@ internet required. Battle, trade, and run a daycare with whoever else is
 on LoRa within range — your save file is the source of truth, the radio
 carries the rest.
 
-> **Status:** active development — LoRa radio is live (RX and TX
-> working, full 6-pokemon daycare beacons transmitted), Meshtastic
-> protocol stack and chat UI are functional, daycare system is wired
-> to the real radio. See [PORTING_NOTES.md](PORTING_NOTES.md) for
-> the open work list.
+> **Status:** active development — LoRa radio is live, bidirectional
+> daycare interop with upstream MonsterMesh (T-Deck) verified on
+> hardware. Meshtastic protocol stack, chat UI, and daycare system are
+> all functional. See [PORTING_NOTES.md](PORTING_NOTES.md) for the
+> open work list.
 
 ---
 
@@ -84,8 +84,8 @@ in the badge-bsp managed component for the full pin map.
   coprocessor's tanmatsu-radio firmware — RX and TX working,
   full-size daycare beacons (all 6 pokemon) transmitted
 - **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB,
-  channel decryption (default key), TEXT_MESSAGE_APP + PRIVATE_APP
-  portnum routing
+  multi-key channel decryption (LongFast + MonsterMesh + plaintext
+  fallback), TEXT_MESSAGE_APP + PRIVATE_APP portnum routing
 - **Chat UI** (Alt+M): full Meshtastic chat view with compose bar,
   message history, and in-emulator notification overlay
 - **Daycare ↔ mesh**: beacon TX/RX, broadcast text, DM callbacks
@@ -179,8 +179,8 @@ MonsterMesh repo for cross-reference) is also gitignored.
 
 **Active development.** The port is running on real hardware with LoRa
 radio active. The emulator, terminal, chat UI, and daycare system are
-all functional. Cross-device mesh communication with upstream
-MonsterMesh (T-Deck Plus) is partially working.
+all functional. Bidirectional daycare interop with upstream MonsterMesh
+on T-Deck verified on hardware.
 
 Things that work today:
 
@@ -191,16 +191,14 @@ Things that work today:
 - Alt+M Meshtastic chat UI with compose bar and message history
 - In-emulator notification overlay for incoming mesh messages
 - LoRa RX: receives Meshtastic packets (NodeInfo, text, PRIVATE_APP)
-- LoRa TX: sends packets including full 6-pokemon daycare beacons
+  with multi-key decryption (LongFast, MonsterMesh, plaintext)
+- LoRa TX: sends packets including full 122-byte daycare beacons on
+  the MonsterMesh channel (AES-128-CTR encrypted, ch=0x25)
 - Daycare auto-check-in on ROM load with real Meshtastic short name
-- Daycare beacon RX: recognises neighbours running upstream MonsterMesh
+- Daycare beacon RX/TX: bidirectional with upstream MonsterMesh on
+  T-Deck — neighbours visible in `status` with names and pokemon
 - Packet dispatch: PRIVATE_APP packets routed to daycare (beacons) or
   battle engine by type byte + size disambiguation
-
-Things that don't work yet:
-
-- The `Gen1Party` mapping out of SRAM into the battle engine uses a
-  placeholder party (correct species, default everything else)
 
 ## Credits
 

@@ -25,11 +25,31 @@ name. Party is parsed from SRAM automatically.
 
 Renze (Nicolai Electronics) fixed the C6 tanmatsu-radio firmware to
 calculate dynamic TX timeouts based on actual packet airtime instead of
-the old hardcoded ~1s. Full 121-byte DaycareBeacon (all 6 pokemon)
-transmits successfully at SF11/BW250 (LongFast).
+the old hardcoded ~1s. Full 122-byte DaycareBeacon (all 6 pokemon +
+ngPlusTier) transmits successfully at SF11/BW250 (LongFast).
 
 Requires: tanmatsu-radio >= v2.1.0 (commits e17c642, a66ef5d),
 tanmatsu-lora >= v0.1.1, esp-hosted-tanmatsu >= v2.12.3.
+
+### ~~5. T-Deck ↔ Tanmatsu daycare interop~~ ✓ (Session 8)
+
+Bidirectional daycare beacon exchange verified on hardware. Three bugs
+fixed:
+
+1. **Portnum varint**: `meshtastic_guess_portnum()` rejected 2-byte
+   varints. PRIVATE_APP (portnum 256) encodes as `0x80 0x02`. Added
+   multi-byte varint support.
+
+2. **Encryption channel**: Tanmatsu sent daycare beacons unencrypted on
+   ch=0x00. T-Deck uses MonsterMesh channel (PSK="MonsterMesh!2024",
+   hash=0x25). Added MM key for TX encryption and 3-key RX decryption
+   fallback (LongFast → MonsterMesh → plaintext).
+
+3. **Beacon size**: Tanmatsu sent variable-length beacons (e.g. 36 bytes
+   for 1 pokemon). T-Deck checks `payload_len >= sizeof(DaycareBeacon)`
+   (122 bytes) and silently drops undersized beacons. Fixed by always
+   sending the full 122-byte struct. Also added `ngPlusTier` field to
+   match upstream `GoatsAndMonkeys/monster_mesh` struct layout.
 
 ## Hardware-side TODOs
 
