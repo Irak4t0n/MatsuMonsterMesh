@@ -913,6 +913,15 @@ public:
                 out->nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
                 if (j == 9) out->nicknames[i][10] = 0;
             }
+            const uint8_t *otRaw = &sram[SAV_OT_NAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; ++j) {
+                if (otRaw[j] == SAV_STRING_TERMINATOR) {
+                    out->otNames[i][j] = 0;
+                    break;
+                }
+                out->otNames[i][j] = (uint8_t)gen1CharToAscii(otRaw[j]);
+                if (j == 9) out->otNames[i][10] = 0;
+            }
         }
         return count;
     }

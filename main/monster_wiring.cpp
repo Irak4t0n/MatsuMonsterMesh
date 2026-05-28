@@ -73,9 +73,10 @@ static void daycare_send_beacon_cb(const DaycareBeacon &beacon, void *ctx)
     (void)ctx;
     DaycareBeacon b = beacon;
     b.nodeId = meshtastic_proto_node_id();
-    size_t len = offsetof(DaycareBeacon, pokemon)
-               + b.partyCount * sizeof(b.pokemon[0]);
-    s_radio.sendPacket(0xFFFFFFFF, 0, (const uint8_t *)&b, len);
+    // Send the FULL struct (sizeof = 122 bytes) — the upstream T-Deck
+    // checks `payload_len >= sizeof(DaycareBeacon)` and rejects short
+    // beacons. Empty pokemon slots are zero-initialized.
+    s_radio.sendPacket(0xFFFFFFFF, 0, (const uint8_t *)&b, sizeof(b));
 }
 
 static void daycare_broadcast_cb(const char *msg, void *ctx)
@@ -228,6 +229,14 @@ extern "C" void monster_daycare_tick(void)
         ESP_LOGI(TAG, "  pkt[%d] from=!%08lx type=0x%02x len=%u",
                  i, (unsigned long)pkts[i].from, type,
                  (unsigned)pkts[i].payload_len);
+        // Debug: hex dump first 80 bytes of payload for format analysis.
+        {
+            char hex[80*3+1]; hex[0] = '\0';
+            size_t dlen = pkts[i].payload_len < 80 ? pkts[i].payload_len : 80;
+            for (size_t j = 0; j < dlen; j++)
+                sprintf(hex + j*3, "%02x ", pkts[i].payload[j]);
+            ESP_LOGI(TAG, "  hex: %s", hex);
+        }
         // Full beacon (0x60) — sent by T-Deck Plus / upstream MonsterMesh.
         if (type == DAYCARE_BEACON_TYPE_FULL &&
             pkts[i].payload_len >= offsetof(DaycareBeacon, pokemon)) {
@@ -235,6 +244,16 @@ extern "C" void monster_daycare_tick(void)
             size_t copy = pkts[i].payload_len < sizeof(DaycareBeacon)
                               ? pkts[i].payload_len : sizeof(DaycareBeacon);
             memcpy(&beacon, pkts[i].payload, copy);
+            ESP_LOGI(TAG, "  beacon: node=!%08lx short='%.5s' game='%.8s' party=%u ngp=%u",
+                     (unsigned long)beacon.nodeId, beacon.shortName,
+                     beacon.gameName, (unsigned)beacon.partyCount,
+                     (unsigned)beacon.ngPlusTier);
+            for (uint8_t p = 0; p < beacon.partyCount && p < 6; p++) {
+                ESP_LOGI(TAG, "    mon[%u] species=%u lv=%u nick='%.11s'",
+                         (unsigned)p, (unsigned)beacon.pokemon[p].species,
+                         (unsigned)beacon.pokemon[p].level,
+                         beacon.pokemon[p].nickname);
+            }
             s_daycare.handleBeacon(beacon);
         // Compact beacon (0x61) — sent by other Tanmatsu devices.
         } else if (type == DAYCARE_BEACON_TYPE_COMPACT &&
@@ -245,6 +264,9 @@ extern "C" void monster_daycare_tick(void)
             memcpy(&compact, pkts[i].payload, copy);
             DaycareBeacon beacon = {};
             daycareBeaconFromCompact(beacon, compact);
+            ESP_LOGI(TAG, "  compact beacon: node=!%08lx short='%.5s' party=%u",
+                     (unsigned long)beacon.nodeId, beacon.shortName,
+                     (unsigned)beacon.partyCount);
             s_daycare.handleBeacon(beacon);
         } else {
             // Everything else → battle engine (it checks PktType internally).

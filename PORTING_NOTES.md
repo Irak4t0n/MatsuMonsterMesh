@@ -33,13 +33,14 @@ tanmatsu-lora >= v0.1.1, esp-hosted-tanmatsu >= v2.12.3.
 
 ## Hardware-side TODOs
 
-### 1. `Gen1Party` mapping from daycare/SRAM
+### ~~1. `Gen1Party` mapping from daycare/SRAM~~ ✓ (Session 4–7)
 
-`cmdFight` and `cmdRun` in the terminal use a placeholder party
-(`count=1`, only `species[0]` populated). The full mapping (Gen 1 EV/DV
-bytes from SRAM → `Gen1Pokemon` stat fields) needs to be written —
-straightforward but tedious. The wire path through `MeshtasticRadio` is
-exercised correctly even with the placeholder.
+`buildGen1Party()` does a byte-perfect memcpy of the 44-byte packed
+`Gen1Pokemon` structs from SRAM (DVs, stat exp, moves, PP, levels, HP).
+`initBattlePokeFromSave()` unpacks DVs, reads stat exp, and calculates
+all stats using the correct Gen 1 formula. OT names and nicknames are
+decoded from the Gen 1 character set. The placeholder Pikachu fallback
+only fires when there's no Gen 1 save at all (e.g. Tetris).
 
 ### 2. SRAM bank validity
 
@@ -60,9 +61,8 @@ and the iface overloads enforce a minimum size of
 Hardware test still needed: confirm a non-battery ROM (Tetris) boots
 and the daycare cleanly stays inactive — no crash, no garbage party.
 
-## Display blit race
+### ~~3. Display blit race~~ ✓ (Session 7)
 
-Verified safe in code review (`blit_task` drains the `sem_frame_ready`
-semaphore but skips the BSP call while in `MONSTER_STATE_TERMINAL`) —
-should be confirmed on hardware that Fn+T entry/exit is flicker-free
-across at least a few transitions.
+Confirmed flicker-free on hardware. `blit_task` drains the
+`sem_frame_ready` semaphore but skips the BSP call while in
+`MONSTER_STATE_TERMINAL`.

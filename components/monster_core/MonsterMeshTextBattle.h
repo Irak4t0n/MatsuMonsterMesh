@@ -35,6 +35,7 @@ public:
     enum class Mode  : uint8_t { OFF, NETWORKED, LOCAL_ROGUELIKE };
     enum class Phase : uint8_t {
         IDLE,           // not in a battle
+        WAIT_PARTY,     // exchanging party data with opponent
         WAIT_ACTION,    // waiting for player input
         WAIT_REMOTE,    // submitted; waiting for opponent's action
         WAIT_SWITCH,    // showing switch menu
@@ -100,6 +101,16 @@ public:
         ext_log_ctx_ = ctx;
     }
 
+    // Party supplier callback: called when an incoming TEXT_BATTLE_START
+    // needs our current party for auto-accept. Registered by the terminal.
+    using PartySupplierCb = bool (*)(Gen1Party *out, void *ctx);
+    void setPartySupplier(PartySupplierCb cb, void *ctx) {
+        party_cb_  = cb;
+        party_ctx_ = ctx;
+    }
+
+    uint8_t mySide() const { return mySide_; }
+
 private:
     MeshtasticRadio    *radio_ = nullptr;
     Gen1BattleEngine    engine_;
@@ -109,6 +120,7 @@ private:
 
     uint32_t remoteId_ = 0;
     uint16_t session_  = 0;
+    uint8_t  mySide_   = 0;          // 0 = initiator, 1 = receiver
     uint8_t  cursor_   = 0;          // selected move/party slot
     uint8_t  switchCursor_ = 0;
     bool     pendingRemoteAction_ = false;
@@ -117,6 +129,14 @@ private:
     uint16_t lastSentTurn_   = 0;
     uint32_t lastSendMs_     = 0;
     uint8_t  fleeAttempts_   = 0;
+
+    // Party exchange state (networked battles only).
+    Gen1Party myParty_     = {};     // saved for retransmit
+    Gen1Party remoteParty_ = {};     // reassembled from chunks
+    uint32_t  pendingRngSeed_ = 0;   // engine seed (deferred until parties exchanged)
+    uint8_t   partyChunksRecv_  = 0; // bitmask of received chunk indices
+    uint8_t   partyChunksTotal_ = 0; // expected total chunks from opponent
+    static constexpr uint8_t PARTY_CHUNK_DATA = BATTLELINK_MAX_PAYLOAD - 2; // 194 bytes per chunk
 
     // Scrolling text log — circular buffer.
     char    log_[LOG_LINES][LOG_WIDTH + 1] = {};
@@ -131,6 +151,10 @@ private:
     ExtLogCb ext_log_cb_  = nullptr;
     void    *ext_log_ctx_ = nullptr;
 
+    // Party supplier for auto-accept of incoming battles.
+    PartySupplierCb party_cb_  = nullptr;
+    void           *party_ctx_ = nullptr;
+
     // Timeouts
     uint32_t lastRecvMs_ = 0;
     static constexpr uint32_t REMOTE_TIMEOUT_MS = 60000;   // 60s w/o packet → forfeit
@@ -142,9 +166,13 @@ private:
     static void engineLogCb(const char *line, void *ctx);
 
     void sendStart(uint32_t rngSeed, const Gen1Party &myParty);
+    void sendParty();
     void sendAction(uint8_t actionType, uint8_t index);
     void sendForfeit();
     void sendHash();
+
+    // Called when all opponent party chunks have arrived; starts the engine.
+    void onPartyComplete();
 
     // After both sides submitted, run executeTurn and prep next phase.
     void resolveTurn();

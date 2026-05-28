@@ -74,8 +74,10 @@ bool LoRaMeshtasticRadio::begin()
 bool LoRaMeshtasticRadio::sendPacket(uint32_t dest, uint8_t channel,
                                       const uint8_t *payload, size_t len)
 {
-    (void)channel;   // always LongFast default channel
-    esp_err_t err = meshtastic_send_private(dest, payload, len);
+    // All MonsterMesh PRIVATE_APP traffic goes on the MonsterMesh Center
+    // channel (unencrypted, channel hash 0x00) for T-Deck compatibility.
+    (void)channel;
+    esp_err_t err = meshtastic_send_private_mm(dest, payload, len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "sendPacket failed: %s", esp_err_to_name(err));
     }

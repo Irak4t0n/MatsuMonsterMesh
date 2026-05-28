@@ -195,6 +195,14 @@ MatsuMonsterTerminal::MatsuMonsterTerminal(PokemonDaycare        *daycare,
                 static_cast<MatsuMonsterTerminal *>(ctx)->println(line);
             },
             this);
+        battle_->setPartySupplier(
+            [](Gen1Party *out, void *ctx) -> bool {
+                auto *self = static_cast<MatsuMonsterTerminal *>(ctx);
+                if (!self->loadSavParty()) return false;
+                *out = self->sav_party_;
+                return true;
+            },
+            this);
     }
 }
 
@@ -642,9 +650,20 @@ void MatsuMonsterTerminal::cmdStatus()
     printf_line("Trainer:    %s  Node: %s",
                 daycare_->getGameName(), daycare_->getShortName());
     printf_line("Party:      %u", (unsigned)state.partyCount);
+    uint8_t nbrCnt = daycare_->getNeighborCount();
     printf_line("Neighbors:  %d (mesh nodes: %d)",
-                (int)daycare_->getNeighborCount(),
-                radio_->getNeighborCount());
+                (int)nbrCnt, radio_->getNeighborCount());
+    const auto *nbrs = daycare_->getNeighbors();
+    for (uint8_t i = 0; i < nbrCnt; ++i) {
+        const char *lead = (nbrs[i].partyCount > 0 && nbrs[i].party[0].species > 0)
+                               ? speciesName(nbrs[i].party[0].species) : "?";
+        printf_line("  [%s] %s — %s lv%u (%u mon)",
+                    nbrs[i].shortName,
+                    nbrs[i].gameName[0] ? nbrs[i].gameName : "???",
+                    lead,
+                    (unsigned)(nbrs[i].partyCount > 0 ? nbrs[i].party[0].level : 0),
+                    (unsigned)nbrs[i].partyCount);
+    }
     printf_line("Achievements: 0x%016llx",
                 (unsigned long long)state.achievementFlags);
 
@@ -856,8 +875,9 @@ void MatsuMonsterTerminal::cmdCatch()
     // ball type, status, and a divisor that's brutal at full HP. Ours:
     //   base 30% + 1% per missing HP%, +25% if foe is statused, capped 95%.
     // Quick reference at L5 vs full-HP foe → 30%; at 1HP → 95%.
-    const auto &foe = battle_->engine().party(1).mons[
-                          battle_->engine().party(1).active];
+    uint8_t foeSide = 1 - battle_->mySide();
+    const auto &foe = battle_->engine().party(foeSide).mons[
+                          battle_->engine().party(foeSide).active];
     if (foe.species == 0 || foe.maxHp == 0) {
         println("(catch: foe state invalid)");
         return;
@@ -1498,9 +1518,15 @@ void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
                   x, y, "── BATTLE ──");
     y += LINE_PX + 2;
 
+    if (battle_->phase() == MonsterMeshTextBattle::Phase::WAIT_PARTY) {
+        pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX,
+                      x, y, "Exchanging parties...");
+        return;
+    }
     const auto &eng = battle_->engine();
-    const auto &mp  = eng.party(0);
-    const auto &fp  = eng.party(1);
+    uint8_t side = battle_->mySide();
+    const auto &mp  = eng.party(side);
+    const auto &fp  = eng.party(1 - side);
     if (mp.count == 0 || fp.count == 0) return;
     const auto &me   = mp.mons[mp.active];
     const auto &foe  = fp.mons[fp.active];

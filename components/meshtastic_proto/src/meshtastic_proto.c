@@ -53,6 +53,13 @@ static const uint8_t MESHTASTIC_LONGFAST_KEY[16] = {
     0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
 };
 
+// MonsterMesh channel: name="MonsterMesh", PSK="MonsterMesh!2024".
+// Channel hash = XOR(name_bytes) ^ XOR(key_bytes) = 0x6F ^ 0x4A = 0x25.
+static const uint8_t MESHTASTIC_MM_KEY[16] = {
+    'M','o','n','s','t','e','r','M','e','s','h','!','2','0','2','4',
+};
+#define MESHTASTIC_MM_CHANNEL_HASH 0x25
+
 // Build the 16-byte CTR nonce per CryptoEngine::initNonce in upstream.
 // nonce[0..7]  = packet_id as 64-bit LE (upper 32 bits zero on the wire)
 // nonce[8..11] = from_node as 32-bit LE
@@ -72,9 +79,10 @@ static void build_nonce(uint8_t out[16], uint32_t from_node, uint32_t packet_id)
     // bytes 12-15 = extraNonce, zero
 }
 
-esp_err_t meshtastic_decrypt_longfast(uint32_t from_node, uint32_t packet_id,
-                                      const uint8_t *in, size_t len,
-                                      uint8_t *out)
+static esp_err_t aes128_ctr_crypt(const uint8_t key[16],
+                                   uint32_t from_node, uint32_t packet_id,
+                                   const uint8_t *in, size_t len,
+                                   uint8_t *out)
 {
     if (!in || !out)  return ESP_ERR_INVALID_ARG;
     if (len == 0)     return ESP_OK;
@@ -87,10 +95,7 @@ esp_err_t meshtastic_decrypt_longfast(uint32_t from_node, uint32_t packet_id,
 
     mbedtls_aes_context ctx;
     mbedtls_aes_init(&ctx);
-    // Meshtastic uses AES-128. The default PSK is 16 bytes, and upstream
-    // calls mbedtls with key_len=128. See note above the LONGFAST_KEY
-    // constant.
-    int rc = mbedtls_aes_setkey_enc(&ctx, MESHTASTIC_LONGFAST_KEY, 128);
+    int rc = mbedtls_aes_setkey_enc(&ctx, key, 128);
     if (rc != 0) {
         mbedtls_aes_free(&ctx);
         return ESP_FAIL;
@@ -100,17 +105,27 @@ esp_err_t meshtastic_decrypt_longfast(uint32_t from_node, uint32_t packet_id,
     return (rc == 0) ? ESP_OK : ESP_FAIL;
 }
 
+esp_err_t meshtastic_decrypt_longfast(uint32_t from_node, uint32_t packet_id,
+                                      const uint8_t *in, size_t len,
+                                      uint8_t *out)
+{
+    return aes128_ctr_crypt(MESHTASTIC_LONGFAST_KEY, from_node, packet_id,
+                            in, len, out);
+}
+
 int meshtastic_guess_portnum(const uint8_t *plain, size_t len)
 {
     // A real Data message's first byte is the protobuf tag for field 1
     // (portnum), which is `(1<<3) | 0` = 0x08. Field 1 is varint-encoded
-    // PortNum. PortNums in active use are all < 128, so they fit in a
-    // single varint byte. So the on-the-wire pattern for a Data message
-    // starting with portnum=N (N<128) is exactly `08 NN ...`.
+    // PortNum. We need to support multi-byte varints because PRIVATE_APP
+    // is portnum 256 (varint: 0x80 0x02).
     if (!plain || len < 2)        return -1;
     if (plain[0] != 0x08)         return -1;
-    if (plain[1] & 0x80)          return -1;  // multi-byte varint: portnum >= 128 — unlikely
-    return (int)plain[1];
+    // Decode up to 2-byte varint (covers portnums 0–16383).
+    if (!(plain[1] & 0x80))       return (int)plain[1];
+    if (len < 3)                  return -1;
+    if (plain[2] & 0x80)          return -1;  // 3+ byte varint: portnum >= 16384 — reject
+    return (int)((plain[1] & 0x7F) | ((uint32_t)plain[2] << 7));
 }
 
 // ── Minimal protobuf reader ──────────────────────────────────────────
@@ -598,6 +613,50 @@ static esp_err_t send_data_frame(uint32_t to, uint32_t pkt_id,
     return meshtastic_lora_send_raw(pkt, total);
 }
 
+// MonsterMesh channel: encrypted with MonsterMesh!2024 PSK, ch=0x25.
+static esp_err_t send_data_frame_mm(uint32_t to, uint32_t pkt_id,
+                                     uint8_t *data_pb, size_t data_len)
+{
+    if (data_len == 0 || data_len + MESHTASTIC_HEADER_LEN > ML_RAW_MAX_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint32_t from = meshtastic_proto_node_id();
+
+    // Encrypt the Data protobuf with the MonsterMesh channel key.
+    uint8_t encrypted[ML_RAW_MAX_LEN];
+    esp_err_t err = aes128_ctr_crypt(MESHTASTIC_MM_KEY, from, pkt_id,
+                                      data_pb, data_len, encrypted);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mm encrypt failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint8_t pkt[ML_RAW_MAX_LEN];
+    pkt[0]  = (uint8_t)(to      );
+    pkt[1]  = (uint8_t)(to  >>  8);
+    pkt[2]  = (uint8_t)(to  >> 16);
+    pkt[3]  = (uint8_t)(to  >> 24);
+    pkt[4]  = (uint8_t)(from     );
+    pkt[5]  = (uint8_t)(from >>  8);
+    pkt[6]  = (uint8_t)(from >> 16);
+    pkt[7]  = (uint8_t)(from >> 24);
+    pkt[8]  = (uint8_t)(pkt_id      );
+    pkt[9]  = (uint8_t)(pkt_id >>  8);
+    pkt[10] = (uint8_t)(pkt_id >> 16);
+    pkt[11] = (uint8_t)(pkt_id >> 24);
+    pkt[12] = 0x63;  // flags: hop 3/3
+    pkt[13] = MESHTASTIC_MM_CHANNEL_HASH;
+    pkt[14] = 0;     // next_hop
+    pkt[15] = 0;     // relay_node
+    memcpy(pkt + MESHTASTIC_HEADER_LEN, encrypted, data_len);
+
+    size_t total = MESHTASTIC_HEADER_LEN + data_len;
+    ESP_LOGI(TAG, "tx(mm) to=!%08lx from=!%08lx id=%08lx ch=0x%02x total=%u",
+             (unsigned long)to, (unsigned long)from, (unsigned long)pkt_id,
+             MESHTASTIC_MM_CHANNEL_HASH, (unsigned)total);
+    return meshtastic_lora_send_raw(pkt, total);
+}
+
 esp_err_t meshtastic_send_text(const char *text)
 {
     if (!text)            return ESP_ERR_INVALID_ARG;
@@ -655,6 +714,26 @@ esp_err_t meshtastic_send_private(uint32_t dest,
     pos += len;
 
     return send_data_frame(dest, pkt_id, data_pb, pos);
+}
+
+esp_err_t meshtastic_send_private_mm(uint32_t dest,
+                                      const uint8_t *payload, size_t len)
+{
+    if (!payload || len == 0) return ESP_ERR_INVALID_ARG;
+    if (len > 200)            len = 200;
+
+    uint32_t pkt_id = esp_random() | 0x80000000u;
+
+    uint8_t data_pb[256];
+    size_t  pos = 0;
+    pb_write_varint(data_pb, &pos, (1 << 3) | 0);
+    pb_write_varint(data_pb, &pos, MESHTASTIC_PORTNUM_PRIVATE_APP);
+    pb_write_varint(data_pb, &pos, (2 << 3) | 2);
+    pb_write_varint(data_pb, &pos, (uint32_t)len);
+    memcpy(data_pb + pos, payload, len);
+    pos += len;
+
+    return send_data_frame_mm(dest, pkt_id, data_pb, pos);
 }
 
 esp_err_t meshtastic_send_nodeinfo(const char *long_name, const char *short_name)
@@ -830,28 +909,66 @@ static void drain_task(void *arg)
             // wrong key — you just get garbage — so we use the byte-1
             // protobuf-tag heuristic (`meshtastic_guess_portnum`) to
             // decide whether the result is plausibly real plaintext.
+            //
+            // Session 8: if LongFast decrypt produces garbage (portnum
+            // heuristic fails), try the raw payload as plaintext — the
+            // MonsterMesh Center channel (PSK=0) sends unencrypted.
             entry.decrypted        = false;
             entry.portnum_guess    = -1;
             entry.plain_sample_len = 0;
             entry.body[0]          = '\0';
             if (payload_len > 0) {
                 uint8_t plain[ML_RAW_MAX_LEN];
+                const uint8_t *decoded = NULL;
+
+                // Try 1: LongFast AES-128-CTR decrypt.
                 esp_err_t derr = meshtastic_decrypt_longfast(
                     entry.header.from, entry.header.id,
                     raw + payload_off, payload_len, plain);
                 if (derr == ESP_OK) {
-                    entry.decrypted     = true;
-                    entry.portnum_guess = (int16_t)meshtastic_guess_portnum(plain, payload_len);
+                    int16_t guess = (int16_t)meshtastic_guess_portnum(plain, payload_len);
+                    if (guess >= 0) {
+                        decoded = plain;
+                        entry.portnum_guess = guess;
+                    }
+                }
+
+                // Try 2: MonsterMesh channel key.
+                if (!decoded) {
+                    derr = aes128_ctr_crypt(MESHTASTIC_MM_KEY,
+                               entry.header.from, entry.header.id,
+                               raw + payload_off, payload_len, plain);
+                    if (derr == ESP_OK) {
+                        int16_t guess = (int16_t)meshtastic_guess_portnum(plain, payload_len);
+                        if (guess >= 0) {
+                            decoded = plain;
+                            entry.portnum_guess = guess;
+                        }
+                    }
+                }
+
+                // Try 3: plaintext (PSK=0 channel).
+                if (!decoded) {
+                    int16_t guess = (int16_t)meshtastic_guess_portnum(
+                                        raw + payload_off, payload_len);
+                    if (guess >= 0) {
+                        decoded = raw + payload_off;
+                        entry.portnum_guess = guess;
+                    }
+                }
+
+                if (decoded) {
+                    entry.decrypted = true;
                     size_t ps = payload_len < MESHTASTIC_RECENT_PAYLOAD_SAMPLE
                                     ? payload_len
                                     : MESHTASTIC_RECENT_PAYLOAD_SAMPLE;
                     entry.plain_sample_len = (uint8_t)ps;
-                    memcpy(entry.plain_sample, plain, ps);
+                    memcpy(entry.plain_sample, decoded, ps);
 
                     // Session 2c: pull a printable body out of the Data
                     // submessage when we recognize the portnum.
                     meshtastic_data_t d;
-                    if (meshtastic_decode_data(plain, payload_len, &d) &&
+                    if (meshtastic_decode_data(decoded, payload_len, &d) &&
                         d.payload != NULL) {
                         if (d.portnum == MESHTASTIC_PORTNUM_TEXT_MESSAGE_APP) {
                             size_t copy = d.payload_len < sizeof(entry.body) - 1

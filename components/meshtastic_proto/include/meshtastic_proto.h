@@ -187,11 +187,16 @@ uint32_t meshtastic_proto_node_id(void);
 esp_err_t meshtastic_send_text(const char *text);
 
 // Send a PRIVATE_APP (portnum 256) payload on the default LongFast
-// channel. Used by MonsterMesh battle/daycare traffic — standard
-// Meshtastic clients silently ignore this portnum. `dest` is a NodeNum
+// channel (encrypted with the default AES-128 key). `dest` is a NodeNum
 // (use MESHTASTIC_BROADCAST_ADDR for broadcast).
 esp_err_t meshtastic_send_private(uint32_t dest,
                                    const uint8_t *payload, size_t len);
+
+// Send a PRIVATE_APP (portnum 256) payload on the MonsterMesh Center
+// channel (channel hash 0x00, no encryption). This matches the upstream
+// T-Deck MonsterMesh module which uses channel index 1 with PSK=0.
+esp_err_t meshtastic_send_private_mm(uint32_t dest,
+                                      const uint8_t *payload, size_t len);
 
 // Send a broadcast NodeInfo announce on the default LongFast channel.
 // `long_name` and `short_name` are NUL-terminated UTF-8 strings; pass
