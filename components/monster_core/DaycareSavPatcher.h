@@ -35,23 +35,56 @@ static constexpr uint8_t  SAV_STRING_TERMINATOR  = 0x50;
 // freshly caught Pokémon so they don't trade-evolve incorrectly.
 static constexpr uint16_t SAV_TRAINER_ID         = 0x2605;
 
+// Current box number (0-11). Bit 7 = "box changed" flag (ignored here).
+static constexpr uint16_t SAV_CURRENT_BOX_NUM    = 0x284C;
+
 // "Current box" mirror in bank 1. The game keeps the active PC box's full
 // 1122-byte record here at all times; switching boxes via Bill's PC swaps
 // the contents in/out of the per-box slots in banks 2/3 (0x4000+/0x6000+).
-// Writing here is enough to make a caught mon visible the next time the
-// player opens the PC on the currently-selected box (which is what the
-// in-game catch flow does on a full party — exactly the behaviour we
-// want for `catch` in the terminal).
 static constexpr uint16_t SAV_CURRENT_BOX        = 0x30C0;
 static constexpr uint16_t SAV_BOX_SIZE           = 0x462;   // 1122 bytes
 static constexpr uint8_t  SAV_BOX_CAPACITY       = 20;
 static constexpr uint8_t  SAV_BOX_POKE_SIZE      = 33;      // box record (no level/maxStats)
+static constexpr uint8_t  SAV_NUM_BOXES          = 12;
 // Sub-region offsets relative to the start of a box (mirror or bank slot).
 static constexpr uint16_t BOX_COUNT_OFF          = 0x000;   // 1 byte
 static constexpr uint16_t BOX_SPECIES_OFF        = 0x001;   // 20 + 0xFF terminator
 static constexpr uint16_t BOX_POKE_OFF           = 0x016;   // 20 × 33
 static constexpr uint16_t BOX_OT_OFF             = 0x2AA;   // 20 × 11
 static constexpr uint16_t BOX_NICK_OFF           = 0x386;   // 20 × 11
+
+// Per-box permanent slots in SRAM banks 2 (boxes 1-6) and 3 (boxes 7-12).
+// Each bank holds 6 boxes at SAV_BOX_SIZE intervals.
+static constexpr uint16_t SAV_BANK2_BOX_START    = 0x4000;
+static constexpr uint16_t SAV_BANK3_BOX_START    = 0x6000;
+// Minimum SRAM size to access all 12 PC boxes (end of box 12).
+static constexpr size_t   SAV_ALL_BOXES_MIN      = (size_t)SAV_BANK3_BOX_START + 6u * SAV_BOX_SIZE;
+
+// ── WRAM party layout — Gen 1 (Red/Blue/Yellow) ──────────────────────────
+// Offsets relative to WRAM bank 1 (ram.ibank[1]).
+// Source: pret/pokered wram.asm (wPartyCount, wPartySpecies, wPartyMons, etc.)
+static constexpr uint16_t WRAM_PARTY_COUNT   = 0x163;  // 0xD163
+static constexpr uint16_t WRAM_SPECIES_LIST  = 0x164;  // 0xD164 (6 + 0xFF)
+static constexpr uint16_t WRAM_POKEMON_DATA  = 0x16B;  // 0xD16B (44 × 6)
+static constexpr uint16_t WRAM_OT_NAMES      = 0x273;  // 0xD273 (11 × 6)
+static constexpr uint16_t WRAM_NICKNAMES     = 0x2B5;  // 0xD2B5 (11 × 6)
+
+// ── WRAM party layout — Gen 2 (Gold/Silver/Crystal) ─────────────────────
+// Offsets relative to WRAM bank 1 (ram.ibank[1]).
+// Species bytes are Pokedex numbers directly (no internal-to-dex mapping).
+// Pokemon struct is 48 bytes (32 box + 16 party-only).
+// Source: pret/pokecrystal wram.asm
+static constexpr uint16_t G2_WRAM_PARTY_COUNT  = 0xCD7;  // $DCD7
+static constexpr uint16_t G2_WRAM_SPECIES_LIST = 0xCD8;  // $DCD8 (6 + 0xFF)
+static constexpr uint16_t G2_WRAM_POKEMON_DATA = 0xCDF;  // $DCDF (48 × 6)
+static constexpr uint16_t G2_WRAM_OT_NAMES     = 0xDFF;  // $DDFF (11 × 6)
+static constexpr uint16_t G2_WRAM_NICKNAMES    = 0xE41;  // $DE41 (11 × 6)
+static constexpr uint8_t  G2_POKEMON_SIZE      = 48;     // 0x30
+// Gen 2 party Pokemon offsets
+static constexpr uint8_t  G2_PKM_SPECIES       = 0x00;   // 1 byte (dex number)
+static constexpr uint8_t  G2_PKM_MOVES         = 0x02;   // 4 bytes
+static constexpr uint8_t  G2_PKM_EXP           = 0x08;   // 3 bytes BE
+static constexpr uint8_t  G2_PKM_LEVEL         = 0x1F;   // 1 byte
 
 // ── Offsets within the 44-byte Pokemon struct ──────────────────────────────
 
@@ -657,6 +690,82 @@ public:
         return count;
     }
 
+    // ── Read party from WRAM (live emulator state) ────────────────────
+    // wram_bank1: pointer to gnuboy's ram.ibank[1] (4096 bytes, maps to
+    //             Game Boy address 0xD000-0xDFFF). This is ALWAYS up-to-
+    //             date — no need for the player to save in-game first.
+    static uint8_t readPartyFromWRAM(const uint8_t *wram_bank1,
+                                     DaycarePartyInfo *out) {
+        if (!wram_bank1 || !out) return 0;
+        uint8_t count = wram_bank1[WRAM_PARTY_COUNT];
+        if (count > 6) count = 6;
+
+        for (uint8_t i = 0; i < count; i++) {
+            const uint8_t *pkm = &wram_bank1[WRAM_POKEMON_DATA + i * SAV_POKEMON_SIZE];
+            uint8_t internalIdx = pkm[PKM_SPECIES];
+            out[i].dexNum = internalToDex[internalIdx];
+            out[i].level = pkm[PKM_LEVEL_PARTY];
+            out[i].totalExp = readBE24(&pkm[PKM_EXP]);
+
+            const uint8_t *nickRaw = &wram_bank1[WRAM_NICKNAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; j++) {
+                if (nickRaw[j] == SAV_STRING_TERMINATOR) {
+                    out[i].nickname[j] = '\0'; break;
+                }
+                out[i].nickname[j] = gen1CharToAscii(nickRaw[j]);
+                if (j == 9) out[i].nickname[10] = '\0';
+            }
+            const uint8_t *otRaw = &wram_bank1[WRAM_OT_NAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; j++) {
+                if (otRaw[j] == SAV_STRING_TERMINATOR) {
+                    out[i].otName[j] = '\0'; break;
+                }
+                out[i].otName[j] = gen1CharToAscii(otRaw[j]);
+                if (j == 9) out[i].otName[10] = '\0';
+            }
+            for (int m = 0; m < 4; m++) out[i].moves[m] = pkm[0x08 + m];
+        }
+        return count;
+    }
+
+    // ── Read party from WRAM — Gen 2 (Gold/Silver/Crystal) ──────────
+    static uint8_t readPartyFromWRAM_Gen2(const uint8_t *wram_bank1,
+                                          DaycarePartyInfo *out) {
+        if (!wram_bank1 || !out) return 0;
+        uint8_t count = wram_bank1[G2_WRAM_PARTY_COUNT];
+        if (count > 6) count = 6;
+
+        for (uint8_t i = 0; i < count; i++) {
+            const uint8_t *pkm = &wram_bank1[G2_WRAM_POKEMON_DATA + i * G2_POKEMON_SIZE];
+            // Gen 2 species byte IS the Pokedex number directly
+            out[i].dexNum = pkm[G2_PKM_SPECIES];
+            out[i].level  = pkm[G2_PKM_LEVEL];
+            out[i].totalExp = readBE24(&pkm[G2_PKM_EXP]);
+
+            const uint8_t *nickRaw = &wram_bank1[G2_WRAM_NICKNAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; j++) {
+                if (nickRaw[j] == SAV_STRING_TERMINATOR) {
+                    out[i].nickname[j] = '\0'; break;
+                }
+                out[i].nickname[j] = gen1CharToAscii(nickRaw[j]);
+                if (j == 9) out[i].nickname[10] = '\0';
+            }
+            const uint8_t *otRaw = &wram_bank1[G2_WRAM_OT_NAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; j++) {
+                if (otRaw[j] == SAV_STRING_TERMINATOR) {
+                    out[i].otName[j] = '\0'; break;
+                }
+                out[i].otName[j] = gen1CharToAscii(otRaw[j]);
+                if (j == 9) out[i].otName[10] = '\0';
+            }
+            for (int m = 0; m < 4; m++) {
+                uint8_t mv = pkm[G2_PKM_MOVES + m];
+                out[i].moves[m] = (mv <= 165) ? mv : 0; // drop Gen 2 moves
+            }
+        }
+        return count;
+    }
+
     // ── Write daycare XP/levels back to SRAM ───────────────────────────
     // sram: writable 32KB SRAM buffer
     // partyIdx: which party slot (0-5)
@@ -724,15 +833,16 @@ public:
     };
 
     // Returns:
-    //   0  → added to party
-    //   1  → added to current PC box (party was full)
-    //  -1  → no room (party AND current PC box both full)
-    //  -2  → SRAM unavailable / invalid CaughtMon
+    //   0       → added to party
+    //   1..12   → added to PC box N (1-indexed)
+    //  -1       → no room (party AND all PC boxes full)
+    //  -2       → SRAM unavailable / invalid CaughtMon
     //
     // Caller must fixChecksum() afterwards (skipped here so multiple writes
-    // can be batched). Mirrors the in-game behaviour: full party diverts to
-    // whichever box is currently selected in Bill's PC.
-    static int addCaughtMon(uint8_t *sram, const CaughtMon &mon) {
+    // can be batched). Searches boxes 1-12 sequentially when the party is
+    // full, using the current-box mirror for the active box and the
+    // permanent bank 2/3 slots for all others.
+    static int addCaughtMon(uint8_t *sram, size_t sramSize, const CaughtMon &mon) {
         if (!sram) return -2;
         if (mon.dexNum == 0 || mon.dexNum > 151) return -2;
 
@@ -797,48 +907,40 @@ public:
             return 0;
         }
 
-        // ── Current-box path (party full) ─────────────────────────────
-        const uint16_t box = SAV_CURRENT_BOX;
-        uint8_t box_count = sram[box + BOX_COUNT_OFF];
-        if (box_count > SAV_BOX_CAPACITY) box_count = 0;   // garbage → reset
-        if (box_count >= SAV_BOX_CAPACITY) return -1;
+        // ── PC box path (party full) — search boxes 1-12 sequentially ─
+        uint8_t curBoxNum = (sramSize > SAV_CURRENT_BOX_NUM)
+                                ? (sram[SAV_CURRENT_BOX_NUM] & 0x0F) : 0;
+        if (curBoxNum >= SAV_NUM_BOXES) curBoxNum = 0;
 
-        const uint8_t i = box_count;
-        sram[box + BOX_COUNT_OFF]              = box_count + 1;
-        sram[box + BOX_SPECIES_OFF + i]        = internalIdx;
-        sram[box + BOX_SPECIES_OFF + i + 1]    = 0xFF;     // re-terminate
+        for (uint8_t b = 0; b < SAV_NUM_BOXES; ++b) {
+            uint16_t boxBase;
+            if (b == curBoxNum) {
+                // Active box → use the mirror (always within bank 1)
+                boxBase = SAV_CURRENT_BOX;
+            } else {
+                // Inactive box → permanent slot in bank 2/3
+                uint16_t perm = boxPermanentAddr(b);
+                if (sramSize < (size_t)perm + SAV_BOX_SIZE) continue;
+                boxBase = perm;
+            }
 
-        uint8_t *bm = &sram[box + BOX_POKE_OFF + i * SAV_BOX_POKE_SIZE];
-        memset(bm, 0, SAV_BOX_POKE_SIZE);
-        // Box format = first 33 bytes of the party format. Same field
-        // offsets (PKM_SPECIES through PKM_DVS / PP) apply.
-        bm[PKM_SPECIES]     = internalIdx;
-        writeBE16(&bm[PKM_CURRENT_HP], mon.hp ? mon.hp : mon.maxHp);
-        bm[PKM_LEVEL_PC]    = mon.level;
-        bm[PKM_STATUS]      = 0;
-        bm[PKM_TYPE1]       = mon.type1;
-        bm[PKM_TYPE2]       = mon.type2;
-        bm[7]               = 45;
-        memcpy(&bm[8], mon.moves, 4);
-        writeBE16(&bm[12], trainer_id);
-        writeBE24(&bm[PKM_EXP], totalExp);
-        bm[PKM_DVS]         = mon.dvs[0];
-        bm[PKM_DVS + 1]     = mon.dvs[1];
-        memcpy(&bm[29], mon.pp, 4);
+            if (writeToBox(sram, boxBase, internalIdx, mon,
+                           trainer_name, trainer_id, totalExp))
+                return 1 + (int)b;   // 1-indexed box number
+        }
 
-        memcpy(&sram[box + BOX_OT_OFF   + i * SAV_NAME_SIZE], trainer_name, SAV_NAME_SIZE);
-        writeNickname(&sram[box + BOX_NICK_OFF + i * SAV_NAME_SIZE], mon.nickname);
-        return 1;
+        return -1;   // all 12 boxes full
     }
 
     // IEmulatorSRAM overload — flat-buffer backends only (matches the rest
     // of this class).
     static int addCaughtMon(IEmulatorSRAM *sram, const CaughtMon &mon) {
         if (!sram) return -2;
-        if (iemu_sram_size(sram) < SAV_MIN_BYTES) return -2;
+        size_t sz = iemu_sram_size(sram);
+        if (sz < SAV_MIN_BYTES) return -2;
         uint8_t *buf = iemu_sram_data(sram);
         if (!buf) return -2;
-        int r = addCaughtMon(buf, mon);
+        int r = addCaughtMon(buf, sz, mon);
         if (r >= 0) iemu_sram_mark_dirty(sram);
         return r;
     }
@@ -934,7 +1036,156 @@ public:
         return buildGen1Party(buf, out);
     }
 
+    // ── Build Gen1Party from Gen 2 WRAM (Crystal/Gold/Silver) ──────────
+    // Maps the Gen 2 48-byte party struct into the Gen 1 44-byte layout
+    // used by the battle engine. Gen 2 species 1-151 map 1:1 to Gen 1;
+    // species >151 are clamped to dex 151 (Mew) for battle compatibility.
+    static uint8_t buildGen1PartyFromWRAM_Gen2(const uint8_t *wram_bank1,
+                                               Gen1Party *out) {
+        if (!wram_bank1 || !out) return 0;
+        memset(out, 0, sizeof(*out));
+        uint8_t count = wram_bank1[G2_WRAM_PARTY_COUNT];
+        if (count > 6) count = 6;
+        out->count = count;
+
+        // Species list — store dex numbers directly (battle engine indexes
+        // GEN1_BASE_STATS by dex number, not Gen 1 internal index)
+        for (uint8_t i = 0; i < count; ++i)
+            out->species[i] = wram_bank1[G2_WRAM_SPECIES_LIST + i];
+        out->species[count] = 0xFF;
+
+        // Map each 48-byte Gen 2 mon into the 44-byte Gen 1 struct
+        for (uint8_t i = 0; i < count; ++i) {
+            const uint8_t *g2 = &wram_bank1[G2_WRAM_POKEMON_DATA + i * G2_POKEMON_SIZE];
+            Gen1Pokemon &g1 = out->mons[i];
+            memset(&g1, 0, sizeof(g1));
+
+            g1.species   = g2[0x00]; // dex number directly
+            g1.hp[0]     = g2[0x22]; g1.hp[1] = g2[0x23];     // curHP
+            g1.boxLevel  = g2[0x1F];                            // level
+            g1.status    = g2[0x20];
+            // Gen 1 only has moves 1-165; drop Gen 2 moves (>165)
+            for (int m = 0; m < 4; ++m)
+                g1.moves[m] = (g2[0x02 + m] <= 165) ? g2[0x02 + m] : 0;
+            g1.otId[0]   = g2[0x06]; g1.otId[1]  = g2[0x07];
+            g1.exp[0]    = g2[0x08]; g1.exp[1]   = g2[0x09]; g1.exp[2] = g2[0x0A];
+            g1.hpExp[0]  = g2[0x0B]; g1.hpExp[1] = g2[0x0C];
+            g1.atkExp[0] = g2[0x0D]; g1.atkExp[1]= g2[0x0E];
+            g1.defExp[0] = g2[0x0F]; g1.defExp[1]= g2[0x10];
+            g1.spdExp[0] = g2[0x11]; g1.spdExp[1]= g2[0x12];
+            g1.spcExp[0] = g2[0x13]; g1.spcExp[1]= g2[0x14];
+            g1.dvs[0]    = g2[0x15]; g1.dvs[1]   = g2[0x16];
+            g1.pp[0]     = g2[0x17]; g1.pp[1]    = g2[0x18];
+            g1.pp[2]     = g2[0x19]; g1.pp[3]    = g2[0x1A];
+            g1.level     = g2[0x1F];
+            g1.maxHp[0]  = g2[0x24]; g1.maxHp[1] = g2[0x25];
+            g1.atk[0]    = g2[0x26]; g1.atk[1]   = g2[0x27];
+            g1.def[0]    = g2[0x28]; g1.def[1]   = g2[0x29];
+            g1.spd[0]    = g2[0x2A]; g1.spd[1]   = g2[0x2B];
+            g1.spc[0]    = g2[0x2C]; g1.spc[1]   = g2[0x2D]; // use SpAtk as Spc
+        }
+
+        // Nicknames + OT names
+        for (uint8_t i = 0; i < count; ++i) {
+            const uint8_t *nickRaw = &wram_bank1[G2_WRAM_NICKNAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; ++j) {
+                if (nickRaw[j] == SAV_STRING_TERMINATOR) {
+                    out->nicknames[i][j] = 0; break;
+                }
+                out->nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
+                if (j == 9) out->nicknames[i][10] = 0;
+            }
+            const uint8_t *otRaw = &wram_bank1[G2_WRAM_OT_NAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; ++j) {
+                if (otRaw[j] == SAV_STRING_TERMINATOR) {
+                    out->otNames[i][j] = 0; break;
+                }
+                out->otNames[i][j] = (uint8_t)gen1CharToAscii(otRaw[j]);
+                if (j == 9) out->otNames[i][10] = 0;
+            }
+        }
+        return count;
+    }
+
+    // ── Build a Gen1Party from WRAM (live emulator state) ─────────────
+    static uint8_t buildGen1PartyFromWRAM(const uint8_t *wram_bank1,
+                                          Gen1Party *out) {
+        if (!wram_bank1 || !out) return 0;
+        memset(out, 0, sizeof(*out));
+        uint8_t count = wram_bank1[WRAM_PARTY_COUNT];
+        if (count > 6) count = 6;
+        out->count = count;
+        memcpy(out->species, &wram_bank1[WRAM_SPECIES_LIST], 7);
+        memcpy(out->mons, &wram_bank1[WRAM_POKEMON_DATA],
+               count * sizeof(Gen1Pokemon));
+        for (uint8_t i = 0; i < count; ++i) {
+            const uint8_t *nickRaw = &wram_bank1[WRAM_NICKNAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; ++j) {
+                if (nickRaw[j] == SAV_STRING_TERMINATOR) {
+                    out->nicknames[i][j] = 0; break;
+                }
+                out->nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
+                if (j == 9) out->nicknames[i][10] = 0;
+            }
+            const uint8_t *otRaw = &wram_bank1[WRAM_OT_NAMES + i * SAV_NAME_SIZE];
+            for (int j = 0; j < 10; ++j) {
+                if (otRaw[j] == SAV_STRING_TERMINATOR) {
+                    out->otNames[i][j] = 0; break;
+                }
+                out->otNames[i][j] = (uint8_t)gen1CharToAscii(otRaw[j]);
+                if (j == 9) out->otNames[i][10] = 0;
+            }
+        }
+        return count;
+    }
+
 private:
+    // ── Flat SRAM offset for a permanent box slot (0-11) ──────────────
+    static uint16_t boxPermanentAddr(uint8_t boxIdx) {
+        if (boxIdx < 6)
+            return SAV_BANK2_BOX_START + (uint16_t)boxIdx * SAV_BOX_SIZE;
+        return SAV_BANK3_BOX_START + (uint16_t)(boxIdx - 6) * SAV_BOX_SIZE;
+    }
+
+    // ── Write a caught mon into a box at `boxBase` ────────────────────
+    // Returns true on success (room found), false if the box is full.
+    static bool writeToBox(uint8_t *sram, uint16_t boxBase,
+                           uint8_t internalIdx, const CaughtMon &mon,
+                           const uint8_t *trainerName, uint16_t trainerId,
+                           uint32_t totalExp)
+    {
+        uint8_t box_count = sram[boxBase + BOX_COUNT_OFF];
+        if (box_count > SAV_BOX_CAPACITY) box_count = 0;   // garbage → reset
+        if (box_count >= SAV_BOX_CAPACITY) return false;
+
+        const uint8_t i = box_count;
+        sram[boxBase + BOX_COUNT_OFF]              = box_count + 1;
+        sram[boxBase + BOX_SPECIES_OFF + i]        = internalIdx;
+        sram[boxBase + BOX_SPECIES_OFF + i + 1]    = 0xFF;  // re-terminate
+
+        uint8_t *bm = &sram[boxBase + BOX_POKE_OFF + i * SAV_BOX_POKE_SIZE];
+        memset(bm, 0, SAV_BOX_POKE_SIZE);
+        bm[PKM_SPECIES]     = internalIdx;
+        writeBE16(&bm[PKM_CURRENT_HP], mon.hp ? mon.hp : mon.maxHp);
+        bm[PKM_LEVEL_PC]    = mon.level;
+        bm[PKM_STATUS]      = 0;
+        bm[PKM_TYPE1]       = mon.type1;
+        bm[PKM_TYPE2]       = mon.type2;
+        bm[7]               = 45;
+        memcpy(&bm[8], mon.moves, 4);
+        writeBE16(&bm[12], trainerId);
+        writeBE24(&bm[PKM_EXP], totalExp);
+        bm[PKM_DVS]         = mon.dvs[0];
+        bm[PKM_DVS + 1]     = mon.dvs[1];
+        memcpy(&bm[29], mon.pp, 4);
+
+        memcpy(&sram[boxBase + BOX_OT_OFF  + i * SAV_NAME_SIZE],
+               trainerName, SAV_NAME_SIZE);
+        writeNickname(&sram[boxBase + BOX_NICK_OFF + i * SAV_NAME_SIZE],
+                      mon.nickname);
+        return true;
+    }
+
     // ── Encode an ASCII nickname (up to 10 chars) into Gen 1 charset ───
     // Always writes a full 11-byte buffer: encoded chars followed by a
     // 0x50 terminator and 0x50 padding for any unused slots. Used by the

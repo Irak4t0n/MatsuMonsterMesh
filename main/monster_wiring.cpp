@@ -167,27 +167,29 @@ extern "C" void monster_init_sram(void)
 
 extern "C" void monster_auto_checkin(const char *shortName)
 {
-    // Direct port of upstream MonsterMeshModule::daycareAutoCheckIn() —
-    // see _refs_monster_mesh/.../MonsterMeshModule.cpp:2399.
     if (!s_inited || !s_sram_ok) {
         ESP_LOGW(TAG, "auto-checkin: wiring not ready");
         return;
     }
     const uint8_t *sram = iemu_sram_data(&s_sram);
     size_t         sram_sz = iemu_sram_size(&s_sram);
-    // Need at least 0x2598 + 7 bytes to read the trainer name, plus the
-    // full SAV layout for daycare.checkIn() to read the party safely.
     if (!sram || sram_sz < (size_t)SAV_CHECKSUM_OFFSET + 1) {
         ESP_LOGW(TAG, "auto-checkin: SRAM unavailable or too small (size=%u)",
                  (unsigned)sram_sz);
         return;
     }
 
-    // Decode trainer name from Gen 1 player-name offset (0x2598, 7 bytes,
-    // Gen 1 charset, 0x50 terminator).
+    // Detect Gen 2 from ROM name
+    const char *romName = gnuboy_rom_name();
+    bool gen2 = romName && (strstr(romName, "CRYSTAL") ||
+                            strstr(romName, "GOLD") ||
+                            strstr(romName, "SILVER"));
+
+    // Decode trainer name — Gen 1 at 0x2598, Gen 2 Crystal at 0x200B
     char gameName[8] = {};
+    uint16_t nameOff = gen2 ? 0x200B : 0x2598;
     for (int i = 0; i < 7; ++i) {
-        uint8_t c = sram[0x2598 + i];
+        uint8_t c = sram[nameOff + i];
         if (c == 0x50) break;
         gameName[i] = gen1CharToAscii(c);
     }
@@ -201,12 +203,21 @@ extern "C" void monster_auto_checkin(const char *shortName)
         && realShort[0] != '\0') {
         sn = realShort;
     }
-    s_daycare.checkIn(sram, sn, gameName);
+
+    // For Gen 2, read party from WRAM (live state); for Gen 1, use SRAM
+    const uint8_t *wram = gnuboy_wram_bank1();
+    if (gen2 && wram) {
+        DaycarePartyInfo party[6];
+        uint8_t count = DaycareSavPatcher::readPartyFromWRAM_Gen2(wram, party);
+        s_daycare.checkIn(party, count, sn, gameName);
+    } else {
+        s_daycare.checkIn(sram, sn, gameName);
+    }
     s_daycare.forceBeacon();
 
     const auto &state = s_daycare.getState();
-    ESP_LOGI(TAG, "auto-checkin: trainer='%s' shortName='%s' party=%u",
-             gameName, sn, (unsigned)state.partyCount);
+    ESP_LOGI(TAG, "auto-checkin: trainer='%s' shortName='%s' party=%u gen2=%d",
+             gameName, sn, (unsigned)state.partyCount, gen2);
 }
 
 extern "C" void monster_daycare_tick(void)

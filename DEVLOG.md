@@ -9,6 +9,51 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 28 2026 — Gen 2 support + terminal performance (Session 9)
+
+### Goal
+Support Pokemon Crystal (Gen 2) party reading from live WRAM, and fix terminal
+slowdown after extended use / battling.
+
+### Gen 2 Support
+
+- Detect Gen 2 ROMs via `gnuboy_rom_name()` (CRYSTAL, GOLD, SILVER)
+- Read party from WRAM bank 1 at Gen 2 offsets ($DCD7 party count, $DCDF
+  pokemon data, $DE41 nicknames) — 48-byte pokemon struct vs Gen 1's 44-byte
+- Species stored as Pokedex numbers directly (no internal-to-dex conversion)
+- Gen 2 moves (ID > 165) filtered to 0 so the Gen 1 battle engine doesn't
+  crash on unknown move lookups
+- Gen 2 Pokemon (dex > 151) use pre-calculated stats from WRAM instead of
+  looking up GEN1_BASE_STATS (which only covers dex 1-151)
+- Daycare auto-check-in reads Crystal trainer name from SRAM offset 0x200B
+- New `PokemonDaycare::checkIn()` overload accepts pre-parsed DaycarePartyInfo
+
+### Terminal Performance Fix
+
+**Problem:** Every `println()` set `dirty_=true`, triggering a full-screen
+redraw including the side panel. The panel's `drawIdlePanel()` rebuilt the
+entire Gen1Party from WRAM on every render frame — expensive and unnecessary.
+After many commands or a battle (which generates many log lines), the
+accumulated render cost made the terminal sluggish and sometimes unresponsive.
+
+**Fix:**
+- Split `dirty_` into `dirty_` (scrollback/header) and `panel_dirty_` (side
+  panel). `println()` only sets `dirty_`, not `panel_dirty_`.
+- Region-based rendering: `pax_draw_rect()` clears only the left region
+  (scrollback + input) on scrollback-only changes. Panel pixels persist in
+  the framebuffer from the last panel redraw.
+- Cached panel party: `refreshPanelParty()` reads WRAM and builds the
+  Gen1Party. Called on terminal entry, after commands, and after battle end.
+  `drawIdlePanel()` reads from the cache instead of WRAM.
+- Removed unused `typeAbbr()` function (eliminated compiler warning).
+
+### Other Changes
+- Simplified move display to just "PP X/Y" (removed type/status prefix)
+- Side panel and daycare check-in now read from WRAM (live game state)
+  instead of SRAM (last in-game save)
+
+---
+
 ## Session May 27 2026 — Fix T-Deck interop: encryption + full-size beacon (Session 8)
 
 ### Goal

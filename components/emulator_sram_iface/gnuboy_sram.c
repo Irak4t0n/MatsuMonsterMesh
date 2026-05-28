@@ -30,6 +30,24 @@ static void     gb_sram_mark_dirty(void* c)                    { (void)c; if (gb
 static void     gb_sram_clear_dirty(void* c)                   { (void)c; if (gb_sram_present()) ram.sram_dirty = 0; }
 static bool     gb_sram_is_battery_backed(void* c)             { (void)c; return gb_sram_present() && mbc.batt != 0; }
 
+uint8_t* gnuboy_wram_bank1(void) {
+    // ram.ibank[1] is always valid (statically allocated in struct ram).
+    return (uint8_t*)ram.ibank[1];
+}
+
+uint8_t gnuboy_mem_read_byte(uint16_t gb_addr) {
+    return mem_read((int)gb_addr);
+}
+
+uint8_t* gnuboy_wram_bank(int n) {
+    if (n < 0 || n > 7) return NULL;
+    return (uint8_t*)ram.ibank[n];
+}
+
+const char* gnuboy_rom_name(void) {
+    return rom.name;
+}
+
 void gnuboy_sram_init(IEmulatorSRAM* out) {
     out->ctx               = NULL;  // gnuboy is a singleton; no per-instance state
     out->size              = gb_sram_size;

@@ -28,6 +28,10 @@ public:
     // shortName: Meshtastic short name (4 chars), gameName: Pokemon trainer name (7 chars)
     void checkIn(const uint8_t *sram, const char *shortName, const char *gameName);
 
+    // Check in from pre-parsed party info (used by Gen 2 WRAM path)
+    void checkIn(const DaycarePartyInfo *party, uint8_t count,
+                 const char *shortName, const char *gameName);
+
     // Legacy check-in for tests (no SRAM)
     void checkIn(const uint8_t *partySpeciesDex, const uint8_t *partyLevels,
                  const char nicknames[][11], uint8_t count,

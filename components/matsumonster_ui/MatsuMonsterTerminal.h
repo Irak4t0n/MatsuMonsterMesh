@@ -88,7 +88,8 @@ private:
 
     // ── UI state ────────────────────────────────────────────────────────────
     bool     wants_exit_       = false;
-    bool     dirty_            = true;   // full redraw needed (header + scrollback + input)
+    bool     dirty_            = true;   // scrollback / header changed — redraw left region
+    bool     panel_dirty_      = true;   // side panel changed — redraw right region
     bool     input_only_dirty_ = false;  // only the input line + cursor changed (typing / blink)
     uint32_t blink_ms_         = 0;      // last blink toggle time
     bool     cursor_on_        = true;
@@ -137,6 +138,7 @@ private:
     void drawSidePanel();
     void drawBattlePanel(int x, int y, int right);
     void drawIdlePanel  (int x, int y, int right);
+    void refreshPanelParty();  // rebuild cached party from WRAM/SRAM
 
     // Battle integration: ticks the battle engine while it's running and
     // drains newly-revealed log lines into the terminal scrollback so the
@@ -155,6 +157,10 @@ private:
     Gen1Party sav_party_       = {};
     bool      sav_party_ready_ = false;
     bool      loadSavParty();   // returns true if sav_party_.count > 0
+
+    // Cached party for the idle side panel (avoids WRAM reads on every render)
+    Gen1Party cached_panel_party_       = {};
+    uint8_t   cached_panel_party_count_ = 0;
 
     // Last wild encounter set up by cmdRun — recorded so pumpBattle can
     // grant the player XP based on the foe's species/level when the engine

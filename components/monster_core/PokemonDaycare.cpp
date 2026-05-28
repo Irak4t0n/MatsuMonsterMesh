@@ -71,6 +71,38 @@ void PokemonDaycare::checkIn(const uint8_t *sram,
     state_.lastBeaconMs = 0;
 }
 
+// ── Check-in from pre-parsed party info (Gen 2 WRAM path) ─────────────────
+
+void PokemonDaycare::checkIn(const DaycarePartyInfo *party, uint8_t count,
+                              const char *shortName, const char *gameName) {
+    if (count > 6) count = 6;
+    if (!loadState() || state_.magic != DaycareState::MAGIC) {
+        init();
+    }
+
+    state_.partyCount = count;
+    for (uint8_t i = 0; i < count; i++) {
+        if (state_.pokemon[i].speciesDex != party[i].dexNum) {
+            state_.pokemon[i] = {};
+            state_.pokemon[i].speciesDex = party[i].dexNum;
+        }
+        state_.pokemon[i].savLevel = party[i].level;
+        state_.pokemon[i].savExp = party[i].totalExp;
+        strncpy(state_.pokemon[i].nickname, party[i].nickname, 10);
+        state_.pokemon[i].nickname[10] = '\0';
+        state_.pokemon[i].mood = MOOD_CONTENT;
+    }
+
+    strncpy(shortName_, shortName, 4);
+    shortName_[4] = '\0';
+    strncpy(gameName_, gameName, 7);
+    gameName_[7] = '\0';
+
+    active_ = true;
+    state_.lastEventMs = mm_millis();
+    state_.lastBeaconMs = 0;
+}
+
 // ── Legacy check-in for tests (no SRAM) ────────────────────────────────────
 
 void PokemonDaycare::checkIn(const uint8_t *partySpeciesDex,

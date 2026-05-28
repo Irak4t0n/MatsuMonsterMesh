@@ -72,12 +72,15 @@ in the badge-bsp managed component for the full pin map.
 ### MonsterMesh layer (this port)
 - Headless Gen 1 battle engine with deterministic dual-side execution
   over a `MeshtasticRadio` abstraction
+- **Gen 2 support**: Pokemon Crystal/Gold/Silver party reading from live
+  WRAM, with automatic Gen 2 move filtering and stat fallbacks
 - Daycare: party check-in/out, hourly events, friendship/rivalry,
   achievements, XP write-back to the running ROM's SRAM — wired to
   the live LoRa radio with auto-beacon on ROM load
 - LORD save / Kanto gym roster data (compiled in, gameplay loop pending)
 - BattleLink wire protocol over Meshtastic PRIVATE_APP portnum
-- Fullscreen terminal UI rendered on top of the emulator (Fn+T to toggle)
+- Fullscreen terminal UI rendered on top of the emulator (Fn+T to toggle),
+  with region-based rendering for responsive input
 
 ### Meshtastic integration
 - **LoRa radio**: live on US 907.125 MHz LongFast via the C6

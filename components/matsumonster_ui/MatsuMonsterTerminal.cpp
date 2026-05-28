@@ -46,8 +46,9 @@ static inline bool mm_restart_to_meshtastic(void) {
 #include "meshtastic_lora.h"     // Path #3 smoke-test commands
 #include "meshtastic_proto.h"    // Path #3 Session 2a parsed-header view
 #include "emulator_sram_iface.h"
+#include "gnuboy_sram.h"        // gnuboy_wram_bank1()
 #include "DaycareData.h"        // daycareSpeciesNames[]
-#include "DaycareSavPatcher.h"  // buildGen1Party
+#include "DaycareSavPatcher.h"  // buildGen1Party, readPartyFromWRAM
 #include "PokemonData.h"        // Gen1Party
 
 // ── Layout constants (logical px) ───────────────────────────────────────────
@@ -236,6 +237,8 @@ void MatsuMonsterTerminal::prepareForReentry()
     xp_pending_        = false;
     battle_was_active_ = false;
     dirty_             = true;   // force a full redraw on next render
+    panel_dirty_       = true;   // panel party may have changed
+    refreshPanelParty();
 }
 
 void MatsuMonsterTerminal::begin()
@@ -245,6 +248,8 @@ void MatsuMonsterTerminal::begin()
     input_buf_[0] = '\0';
     wants_exit_  = false;
     dirty_       = true;
+    panel_dirty_ = true;
+    refreshPanelParty();
 
     println("MonsterMesh Terminal");
     println("Commands: party, status, fight <name>, run, quit, help");
@@ -332,6 +337,10 @@ void MatsuMonsterTerminal::pumpBattle()
     // ctor — no polling needed here.
     if (battle_->isActive()) {
         battle_->tick(now_ms());
+        if (battle_->dirty()) {
+            panel_dirty_ = true;  // HP/moves changed — redraw battle panel
+            battle_->clearDirty();
+        }
     }
 
     // Auto-dismiss the result screen the moment the engine flips to FINISHED.
@@ -344,6 +353,8 @@ void MatsuMonsterTerminal::pumpBattle()
         battle_->phase() == MonsterMeshTextBattle::Phase::FINISHED) {
         battle_->exit();
         dirty_ = true;
+        panel_dirty_ = true;   // switch from battle panel → idle panel
+        refreshPanelParty();
     }
 
     // XP payout: when a battle that was ours-to-win just ended in P1_WIN,
@@ -422,6 +433,8 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
         battle_->phase() == MonsterMeshTextBattle::Phase::FINISHED) {
         battle_->exit();
         dirty_ = true;
+        panel_dirty_ = true;
+        refreshPanelParty();
         // Intentionally fall through.
     }
 
@@ -449,6 +462,7 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
             (buffer_empty && is_battle_hotkey(ascii))) {
             battle_->handleKey((uint8_t)ascii);
             dirty_ = true;
+            panel_dirty_ = true;  // battle panel HP/moves may have changed
             return;
         }
         // Fall through: keystroke goes to the terminal input buffer.
@@ -536,6 +550,9 @@ void MatsuMonsterTerminal::submitInput()
     input_len_ = 0;
     input_buf_[0] = '\0';
     handleCommand(cmdcopy);
+    // Commands may start/end battles or change party state — refresh panel.
+    panel_dirty_ = true;
+    refreshPanelParty();
 }
 
 // ── Command dispatch ────────────────────────────────────────────────────────
@@ -606,25 +623,26 @@ void MatsuMonsterTerminal::cmdHelp()
 
 void MatsuMonsterTerminal::cmdParty()
 {
-    // Live-read the running emulator's SRAM via DaycareSavPatcher rather
-    // than the cached daycare state from boot-time auto-checkin. This way
-    // `party` always reflects the user's CURRENT in-game progress, even
-    // if they saved in-game after the daycare last checked in.
-    if (!sram_) {
-        println("(emulator SRAM not bound — load a Gen 1 ROM first)");
-        return;
-    }
-    if (iemu_sram_size(sram_) == 0 || iemu_sram_data(sram_) == nullptr) {
-        println("(this ROM has no battery RAM — try a Pokemon game)");
+    const uint8_t *wram = gnuboy_wram_bank1();
+    if (!wram) {
+        println("(emulator WRAM not available — load a ROM first)");
         return;
     }
 
+    // Detect Gen 2 from ROM name
+    const char *romName = gnuboy_rom_name();
+    bool gen2 = romName && (strstr(romName, "CRYSTAL") ||
+                            strstr(romName, "GOLD") ||
+                            strstr(romName, "SILVER"));
+    ESP_LOGI("party", "ROM: \"%s\" gen2=%d", romName ? romName : "(null)", gen2);
+
     DaycarePartyInfo party[6];
-    uint8_t count = DaycareSavPatcher::readParty(iemu_sram_data(sram_), party);
+    uint8_t count = gen2
+        ? DaycareSavPatcher::readPartyFromWRAM_Gen2(wram, party)
+        : DaycareSavPatcher::readPartyFromWRAM(wram, party);
+
     if (count == 0) {
-        println("Party empty.");
-        println("Tip: in-game, walk to a Pokemon Center or use the");
-        println("     START menu's SAVE option, then re-open the terminal.");
+        println("Party empty (no Pokemon data found).");
         return;
     }
 
@@ -634,9 +652,8 @@ void MatsuMonsterTerminal::cmdParty()
         const char *nick = (p.nickname[0] != '\0')
                                ? p.nickname
                                : speciesName(p.dexNum);
-        printf_line("  %u. %-10s L%-3u  (%s)",
-                    (unsigned)(i + 1), nick, (unsigned)p.level,
-                    speciesName(p.dexNum));
+        printf_line("  %u. %-10s L%u",
+                    (unsigned)(i + 1), nick, (unsigned)p.level);
     }
 }
 
@@ -745,9 +762,24 @@ void MatsuMonsterTerminal::cmdFight(const char *args)
 // reason to cache. Returns true if at least one Pokémon was read.
 bool MatsuMonsterTerminal::loadSavParty()
 {
+    // Prefer WRAM (live state) over SRAM (last save) so battles use the
+    // player's current in-game party, even if they haven't saved recently.
+    const uint8_t *wram = gnuboy_wram_bank1();
+    if (wram) {
+        const char *romName = gnuboy_rom_name();
+        bool gen2 = romName && (strstr(romName, "CRYSTAL") ||
+                                strstr(romName, "GOLD") ||
+                                strstr(romName, "SILVER"));
+        uint8_t n = gen2
+            ? DaycareSavPatcher::buildGen1PartyFromWRAM_Gen2(wram, &sav_party_)
+            : DaycareSavPatcher::buildGen1PartyFromWRAM(wram, &sav_party_);
+        sav_party_ready_ = (n > 0);
+        if (n > 0) return true;
+    }
+    // Fallback to SRAM if WRAM isn't available
     if (!sram_) return false;
     uint8_t n = DaycareSavPatcher::buildGen1Party(sram_, &sav_party_);
-    sav_party_ready_ = (n > 0);   // kept for any future caller that wants the flag
+    sav_party_ready_ = (n > 0);
     return n > 0;
 }
 
@@ -922,21 +954,16 @@ void MatsuMonsterTerminal::cmdCatch()
 
     // ── Write the record + checksum ───────────────────────────────────
     int dest = DaycareSavPatcher::addCaughtMon(sram_, cm);
-    switch (dest) {
-        case 0:
-            printf_line("Gotcha! %s was added to your party.", foeName);
-            break;
-        case 1:
-            printf_line("Gotcha! %s was sent to your PC.", foeName);
-            println("(Party full — check the current Bill's PC box.)");
-            break;
-        case -1:
-            println("Caught it... but party AND current PC box are full!");
-            println("(Switch to an empty box in Bill's PC, then try again.)");
-            return;   // leave battle running so the player can flee/forfeit
-        default:
-            println("(catch: SRAM write failed)");
-            return;
+    if (dest == 0) {
+        printf_line("Gotcha! %s was added to your party.", foeName);
+    } else if (dest >= 1 && dest <= 12) {
+        printf_line("Gotcha! %s was sent to PC Box %d.", foeName, dest);
+    } else if (dest == -1) {
+        println("Caught it... but party AND all PC boxes are full!");
+        return;   // leave battle running so the player can flee/forfeit
+    } else {
+        println("(catch: SRAM write failed)");
+        return;
     }
 
     uint8_t *buf = iemu_sram_data(sram_);
@@ -1333,37 +1360,35 @@ void MatsuMonsterTerminal::cmdQuit()
 void MatsuMonsterTerminal::render()
 {
     if (!fb_ || canvas_w_ <= 0 || canvas_h_ <= 0) return;
-    if (!dirty_ && !input_only_dirty_) return;
+    if (!dirty_ && !panel_dirty_ && !input_only_dirty_) return;
 
-    // Throttle ONLY the heavy full-redraw path; the fast input-line path is
-    // small enough (one rect + two text calls + one blit) that letting it
-    // run at the full pump cadence (~60 Hz) keeps typing and the blinking
-    // cursor responsive. Throttling the input path was causing the cursor
-    // to "stay there" mid-typing because keystrokes between throttle
-    // windows had to wait for the next 33ms tick to redraw.
+    // Throttle the heavy redraw paths; the fast input-line path is small
+    // enough that running at full pump cadence keeps typing responsive.
     uint32_t t = now_ms();
-    if (dirty_ && (t - last_render_ms_ < 33)) return;
+    bool need_heavy = dirty_ || panel_dirty_;
+    if (need_heavy && (t - last_render_ms_ < 33)) return;
     last_render_ms_ = t;
 
-    if (dirty_) {
-        // Full redraw: scrollback / header / panel changed.
-        pax_background(fb_, COLOR_BG);
+    int panel_x = canvas_w_ - PANEL_W;
+
+    if (need_heavy) {
+        // Clear + redraw the left region (header + scrollback + input).
+        // Only touch the panel when panel_dirty_ is set — this avoids
+        // expensive WRAM reads and party rebuilds on every println().
+        pax_draw_rect(fb_, COLOR_BG, 0, 0, panel_x, canvas_h_);
         drawHeader();
         drawScrollback();
-        drawSidePanel();
         drawInputLine();
+
+        if (panel_dirty_) {
+            pax_draw_rect(fb_, COLOR_BG, panel_x, 0, PANEL_W, canvas_h_);
+            drawSidePanel();
+        }
     } else {
         // Fast path: only the input line + cursor changed (typing, blink).
-        // Clear a bit more vertical real estate than strictly needed —
-        // pax glyphs and the cursor block extend a few pixels past the
-        // simple bbox, and partial residue looked like a "frozen cursor"
-        // when the new cursor position drew over a stale pixel column.
-        // Restricted to the LEFT region so it doesn't clobber the panel
-        // (the panel's footer rows sit inside the strip's vertical range).
         int strip_y = canvas_h_ - INPUT_H - 8;
-        int strip_w = canvas_w_ - PANEL_W;
         pax_draw_rect(fb_, COLOR_BG, 0, strip_y,
-                      strip_w, canvas_h_ - strip_y);
+                      panel_x, canvas_h_ - strip_y);
         drawInputLine();
     }
 
@@ -1372,6 +1397,7 @@ void MatsuMonsterTerminal::render()
     // memory dimensions (e.g. 480 wide × 800 tall portrait), so swap.
     bsp_display_blit(0, 0, canvas_h_, canvas_w_, pax_buf_get_pixels(fb_));
     dirty_            = false;
+    panel_dirty_      = false;
     input_only_dirty_ = false;
 }
 
@@ -1468,29 +1494,6 @@ void MatsuMonsterTerminal::drawInputLine()
 // otherwise we show a party summary + command cheatsheet so the user
 // always has something useful in the otherwise-empty right column.
 
-// Compact 3-letter type abbreviation (NORMAL → "Nor", ELECTRIC → "Ele").
-// Falls back to "???" for out-of-range. Static lookup table — generated
-// once from GEN1_TYPE_NAMES at first call so we don't rebuild on every
-// render frame.
-static const char *typeAbbr(uint8_t type)
-{
-    static char abbr[24][4] = {};
-    static bool ready = false;
-    if (!ready) {
-        const size_t n = sizeof(GEN1_TYPE_NAMES) / sizeof(GEN1_TYPE_NAMES[0]);
-        for (size_t i = 0; i < n && i < 24; ++i) {
-            const char *s = GEN1_TYPE_NAMES[i];
-            abbr[i][0] = s[0];
-            abbr[i][1] = s[1] ? (char)(s[1] | 0x20) : '\0';   // lower
-            abbr[i][2] = s[2] ? (char)(s[2] | 0x20) : '\0';
-            abbr[i][3] = '\0';
-        }
-        ready = true;
-    }
-    if (type >= 24) return "???";
-    return abbr[type];
-}
-
 void MatsuMonsterTerminal::drawSidePanel()
 {
     int px     = canvas_w_ - PANEL_W;       // panel left edge
@@ -1573,14 +1576,8 @@ void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
         snprintf(buf, sizeof(buf), "%d) %.14s", i + 1, m->name);
         pax_draw_text(fb_, name_color, pax_font_sky_mono, FONT_PX, x, y, buf);
         y += LINE_PX;
-        if (m->power == 0) {
-            snprintf(buf, sizeof(buf), "   %s status PP%u/%u",
-                     typeAbbr(m->type), (unsigned)me.pp[i], (unsigned)m->pp);
-        } else {
-            snprintf(buf, sizeof(buf), "   %s P%u PP%u/%u",
-                     typeAbbr(m->type), (unsigned)m->power,
-                     (unsigned)me.pp[i], (unsigned)m->pp);
-        }
+        snprintf(buf, sizeof(buf), "   PP %u/%u",
+                 (unsigned)me.pp[i], (unsigned)m->pp);
         pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX, x, y, buf);
         y += LINE_PX;
     }
@@ -1618,20 +1615,37 @@ void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
     pax_draw_text(fb_, foe_color, pax_font_sky_mono, FONT_PX, x, y, buf);
 }
 
+void MatsuMonsterTerminal::refreshPanelParty()
+{
+    const uint8_t *wram = gnuboy_wram_bank1();
+    const char *romName = gnuboy_rom_name();
+    bool gen2 = romName && (strstr(romName, "CRYSTAL") ||
+                            strstr(romName, "GOLD") ||
+                            strstr(romName, "SILVER"));
+    if (gen2 && wram)
+        cached_panel_party_count_ = DaycareSavPatcher::buildGen1PartyFromWRAM_Gen2(wram, &cached_panel_party_);
+    else if (wram)
+        cached_panel_party_count_ = DaycareSavPatcher::buildGen1PartyFromWRAM(wram, &cached_panel_party_);
+    else if (sram_)
+        cached_panel_party_count_ = DaycareSavPatcher::buildGen1Party(sram_, &cached_panel_party_);
+    else
+        cached_panel_party_count_ = 0;
+}
+
 void MatsuMonsterTerminal::drawIdlePanel(int x, int y, int right)
 {
     char buf[64];
 
-    // ── Party (live SRAM read; falls back to a hint line on no-party) ──
+    // ── Party (uses cached data from refreshPanelParty) ──
     pax_draw_text(fb_, COLOR_HEADER, pax_font_sky_mono, FONT_PX,
                   x, y, "── PARTY ──");
     y += LINE_PX + 2;
 
-    Gen1Party party = {};
-    uint8_t n = sram_ ? DaycareSavPatcher::buildGen1Party(sram_, &party) : 0;
+    const Gen1Party &party = cached_panel_party_;
+    uint8_t n = cached_panel_party_count_;
     if (n == 0) {
         pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX,
-                      x, y, "(no Gen 1 save)");
+                      x, y, "(no save data)");
         y += LINE_PX + 4;
     } else {
         for (uint8_t i = 0; i < n && i < 6; ++i) {

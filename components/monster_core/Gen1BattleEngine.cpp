@@ -69,17 +69,30 @@ void Gen1BattleEngine::initBattlePokeFromSave(BattlePoke &dst,
     const Gen1BaseStats &b = GEN1_BASE_STATS[src.species < 152 ? src.species : 0];
     dst.type1 = b.type1; dst.type2 = b.type2;
 
-    uint16_t hpExp  = be16(src.hpExp);
-    uint16_t atkExp = be16(src.atkExp);
-    uint16_t defExp = be16(src.defExp);
-    uint16_t spdExp = be16(src.spdExp);
-    uint16_t spcExp = be16(src.spcExp);
+    if (b.hp > 0) {
+        // Gen 1 Pokemon — recalculate stats from base + DVs + stat exp
+        uint16_t hpExp  = be16(src.hpExp);
+        uint16_t atkExp = be16(src.atkExp);
+        uint16_t defExp = be16(src.defExp);
+        uint16_t spdExp = be16(src.spdExp);
+        uint16_t spcExp = be16(src.spcExp);
 
-    dst.maxHp = calcStat(b.hp,  hpDV,  hpExp,  dst.level, true);
-    dst.atk   = calcStat(b.atk, atkDV, atkExp, dst.level, false);
-    dst.def   = calcStat(b.def, defDV, defExp, dst.level, false);
-    dst.spd   = calcStat(b.spd, spdDV, spdExp, dst.level, false);
-    dst.spc   = calcStat(b.spc, spcDV, spcExp, dst.level, false);
+        dst.maxHp = calcStat(b.hp,  hpDV,  hpExp,  dst.level, true);
+        dst.atk   = calcStat(b.atk, atkDV, atkExp, dst.level, false);
+        dst.def   = calcStat(b.def, defDV, defExp, dst.level, false);
+        dst.spd   = calcStat(b.spd, spdDV, spdExp, dst.level, false);
+        dst.spc   = calcStat(b.spc, spcDV, spcExp, dst.level, false);
+    } else {
+        // Gen 2+ Pokemon (no base stats in table) — use the pre-calculated
+        // stats directly from the save/WRAM data
+        dst.maxHp = be16(src.maxHp);
+        dst.atk   = be16(src.atk);
+        dst.def   = be16(src.def);
+        dst.spd   = be16(src.spd);
+        dst.spc   = be16(src.spc);
+        // Normal type as fallback (no type data for Gen 2 Pokemon)
+        dst.type1 = dst.type2 = 0; // Normal
+    }
     dst.hp    = be16(src.hp);
     if (dst.hp == 0 || dst.hp > dst.maxHp) dst.hp = dst.maxHp;
 
