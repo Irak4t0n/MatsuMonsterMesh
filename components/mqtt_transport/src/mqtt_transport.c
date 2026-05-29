@@ -147,14 +147,15 @@ static bool pb_skip(const uint8_t *buf, size_t len, size_t *pos, uint32_t wt)
 // ── ServiceEnvelope encoder ──────────────────────────────────────────────
 
 // Encode a MeshPacket protobuf into `out`, return encoded length.
-// MeshPacket fields used:
+// Field numbers match standard Meshtastic firmware MQTT encoding:
 //   1: from (fixed32)
 //   2: to   (fixed32)
-//   5: encrypted (bytes)   — oneof payload_variant
+//   3: channel (varint)  — channel HASH (e.g. 0x25 for MonsterMesh)
+//   5: encrypted (bytes) — standard firmware uses field 5
 //   6: id (fixed32)
 //   9: hop_limit (varint)
-//  16: via_mqtt (bool/varint)
-//  17: hop_start (varint)
+//  14: via_mqtt (bool/varint)
+//  15: hop_start (varint)
 static size_t encode_mesh_packet(uint8_t *out, size_t cap,
                                    uint32_t from, uint32_t to,
                                    uint32_t pkt_id, uint8_t channel_hash,
@@ -163,14 +164,16 @@ static size_t encode_mesh_packet(uint8_t *out, size_t cap,
     size_t pos = 0;
     (void)cap;  // caller ensures buffer is large enough
 
-    pb_put_fixed32_field(out, &pos, 1, from);      // from
-    pb_put_fixed32_field(out, &pos, 2, to);         // to
-    pb_put_varint_field(out, &pos, 3, 0);           // channel index (0 for primary)
-    pb_put_bytes(out, &pos, 5, encrypted, enc_len); // encrypted payload
-    pb_put_fixed32_field(out, &pos, 6, pkt_id);     // id
-    pb_put_varint_field(out, &pos, 9, 3);           // hop_limit
-    pb_put_varint_field(out, &pos, 16, 1);          // via_mqtt = true
-    pb_put_varint_field(out, &pos, 17, 3);          // hop_start
+    // Match standard Meshtastic firmware encoding (field 5 for encrypted,
+    // channel = hash value, not index).
+    pb_put_fixed32_field(out, &pos, 1, from);            // from
+    pb_put_fixed32_field(out, &pos, 2, to);               // to
+    pb_put_varint_field(out, &pos, 3, channel_hash);       // channel HASH (not index)
+    pb_put_bytes(out, &pos, 5, encrypted, enc_len);       // encrypted (field 5!)
+    pb_put_fixed32_field(out, &pos, 6, pkt_id);           // id
+    pb_put_varint_field(out, &pos, 9, 3);                 // hop_limit
+    pb_put_varint_field(out, &pos, 14, 1);                // via_mqtt = true
+    pb_put_varint_field(out, &pos, 15, 3);                // hop_start
 
     return pos;
 }
@@ -242,7 +245,8 @@ static bool decode_mesh_packet(const uint8_t *buf, size_t len,
                 if (wt != 0) { if (!pb_skip(buf, len, &pos, wt)) return false; break; }
                 out->channel = pb_read_varint(buf, len, &pos);
                 break;
-            case 5:  // encrypted (bytes)
+            case 5:  // encrypted (bytes) — legacy field 5 (some firmware)
+            case 8:  // encrypted (bytes) — standard upstream field 8
                 if (wt != 2) { if (!pb_skip(buf, len, &pos, wt)) return false; break; }
                 out->encrypted_len = pb_read_varint(buf, len, &pos);
                 if (pos + out->encrypted_len > len) return false;
@@ -257,11 +261,11 @@ static bool decode_mesh_packet(const uint8_t *buf, size_t len,
                 if (wt != 0) { if (!pb_skip(buf, len, &pos, wt)) return false; break; }
                 out->hop_limit = pb_read_varint(buf, len, &pos);
                 break;
-            case 16: // via_mqtt (varint/bool)
+            case 14: // via_mqtt (varint/bool)
                 if (wt != 0) { if (!pb_skip(buf, len, &pos, wt)) return false; break; }
                 out->via_mqtt = pb_read_varint(buf, len, &pos) != 0;
                 break;
-            case 17: // hop_start (varint)
+            case 15: // hop_start (varint)
                 if (wt != 0) { if (!pb_skip(buf, len, &pos, wt)) return false; break; }
                 out->hop_start = pb_read_varint(buf, len, &pos);
                 break;
@@ -277,6 +281,16 @@ static bool decode_mesh_packet(const uint8_t *buf, size_t len,
 // and push into the LoRa raw queue for the drain task to process.
 static void handle_mqtt_message(const uint8_t *data, size_t data_len)
 {
+    // Hex dump first 64 bytes for protocol comparison
+    {
+        char hex[64 * 3 + 1];
+        size_t dump_len = data_len < 64 ? data_len : 64;
+        for (size_t i = 0; i < dump_len; i++)
+            snprintf(hex + i * 3, 4, "%02x ", data[i]);
+        hex[dump_len * 3] = '\0';
+        ESP_LOGI(TAG, "mqtt rx envelope[%u]: %s", (unsigned)data_len, hex);
+    }
+
     // Parse ServiceEnvelope: field 1 = MeshPacket (bytes/submessage)
     size_t pos = 0;
     const uint8_t *mp_buf = NULL;
@@ -341,10 +355,9 @@ static void handle_mqtt_message(const uint8_t *data, size_t data_len)
     raw[9]  = (uint8_t)(mp.id >> 8);
     raw[10] = (uint8_t)(mp.id >> 16);
     raw[11] = (uint8_t)(mp.id >> 24);
-    // flags: hop_limit in bits 0-2, via_mqtt in bit 4, hop_start in bits 5-7
-    uint8_t flags = (mp.hop_limit & 0x07) |
-                    (mp.via_mqtt ? 0x10 : 0) |
-                    ((mp.hop_start & 0x07) << 5);
+    // flags: hop_limit=0 so drain task won't relay MQTT packets onto LoRa.
+    // via_mqtt bit set to mark origin.
+    uint8_t flags = 0x10;  // hop_limit=0, via_mqtt=1, hop_start=0
     raw[12] = flags;
     raw[13] = 0x25;  // MonsterMesh channel hash
     raw[14] = 0;     // next_hop
@@ -398,8 +411,8 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         case MQTT_EVENT_CONNECTED:
             ESP_LOGI(TAG, "MQTT connected to broker");
             s_connected = true;
-            // Subscribe to MonsterMesh channel
-            esp_mqtt_client_subscribe(s_mqtt_client, MQTT_SUB_TOPIC, 0);
+            // Subscribe to MonsterMesh channel (QoS 1, matching standard Meshtastic)
+            esp_mqtt_client_subscribe(s_mqtt_client, MQTT_SUB_TOPIC, 1);
             ESP_LOGI(TAG, "subscribed to %s", MQTT_SUB_TOPIC);
             break;
 
@@ -559,21 +572,32 @@ esp_err_t mqtt_transport_publish(uint32_t to, uint32_t from,
     char gw_id[12];
     snprintf(gw_id, sizeof(gw_id), "!%08lx", (unsigned long)from);
 
-    // Encode ServiceEnvelope
+    // Encode ServiceEnvelope — pass channel_hash directly (standard firmware
+    // puts the hash in the MeshPacket channel field, not the index).
     uint8_t envelope[768];
     size_t env_len = encode_service_envelope(envelope, sizeof(envelope),
                                               from, to, pkt_id, channel_hash,
                                               encrypted, enc_len,
                                               MQTT_CHANNEL_NAME, gw_id);
 
+    // Hex dump first 64 bytes of ServiceEnvelope for protocol debugging
+    {
+        char hex[64 * 3 + 1];
+        size_t dump_len = env_len < 64 ? env_len : 64;
+        for (size_t i = 0; i < dump_len; i++)
+            snprintf(hex + i * 3, 4, "%02x ", envelope[i]);
+        hex[dump_len * 3] = '\0';
+        ESP_LOGI(TAG, "mqtt tx envelope[%u]: %s", (unsigned)env_len, hex);
+    }
+
     int msg_id = esp_mqtt_client_publish(s_mqtt_client, s_pub_topic,
                                           (const char *)envelope, (int)env_len,
-                                          0, 0);  // QoS 0, no retain
+                                          1, 0);  // QoS 1, no retain
     if (msg_id < 0) {
         ESP_LOGW(TAG, "mqtt publish failed");
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "mqtt tx to=!%08lx id=%08lx len=%u",
-             (unsigned long)to, (unsigned long)pkt_id, (unsigned)env_len);
+    ESP_LOGI(TAG, "mqtt tx to=!%08lx id=%08lx ch=0x%02x topic=%s",
+             (unsigned long)to, (unsigned long)pkt_id, (unsigned)channel_hash, s_pub_topic);
     return ESP_OK;
 }

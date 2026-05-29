@@ -493,7 +493,7 @@ static void chat_push(uint32_t from, uint32_t pkt_id, bool is_self,
     size_t out = 0;
     for (size_t i = 0; i < copy; i++) {
         uint8_t c = text[i];
-        if (c >= 0x20 && c != 0x7F) e->text[out++] = (char)c;
+        if (c >= 0x20 && c < 0x7F) e->text[out++] = (char)c;
     }
     e->text[out]  = '\0';
     e->text_len   = (uint8_t)out;
@@ -571,11 +571,46 @@ void meshtastic_proto_set_mqtt_tx_cb(meshtastic_mqtt_tx_cb_t cb)
 static meshtastic_node_entry_t s_nodedb[MESHTASTIC_NODEDB_CAP];
 static SemaphoreHandle_t       s_nodedb_mtx = NULL;
 
+#define NODEDB_NVS_NS   "mesh_nodedb"
+#define NODEDB_NVS_KEY  "nodes"
+
+static void nodedb_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NODEDB_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, NODEDB_NVS_KEY, s_nodedb, sizeof(s_nodedb));
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "nodedb saved to NVS");
+}
+
+static bool nodedb_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NODEDB_NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    size_t len = sizeof(s_nodedb);
+    esp_err_t err = nvs_get_blob(h, NODEDB_NVS_KEY, s_nodedb, &len);
+    nvs_close(h);
+    if (err == ESP_OK && len == sizeof(s_nodedb)) {
+        int count = 0;
+        for (int i = 0; i < MESHTASTIC_NODEDB_CAP; i++) {
+            if (s_nodedb[i].valid) {
+                s_nodedb[i].last_seen_ms = 0;  // relative time — reset on boot
+                count++;
+            }
+        }
+        ESP_LOGI(TAG, "nodedb loaded from NVS (%d nodes)", count);
+        return true;
+    }
+    return false;
+}
+
 static void nodedb_init(void)
 {
     if (s_nodedb_mtx == NULL) {
         s_nodedb_mtx = xSemaphoreCreateMutex();
         memset(s_nodedb, 0, sizeof(s_nodedb));
+        nodedb_load();
     }
 }
 
@@ -620,6 +655,8 @@ void meshtastic_nodedb_upsert(uint32_t node_num,
     e->last_seen_ms = now_ms();
 
     xSemaphoreGive(s_nodedb_mtx);
+
+    nodedb_save();
 }
 
 bool meshtastic_nodedb_lookup(uint32_t node_num,
@@ -668,6 +705,12 @@ size_t meshtastic_nodedb_snapshot(meshtastic_node_entry_t *out, size_t max_out)
     xSemaphoreGive(s_nodedb_mtx);
     return copied;
 }
+
+// ── Event-driven NodeInfo debounce (Session 12) ─────────────────────
+#define REACTIVE_NODEINFO_COOLDOWN_MS   60000   // 60 s global debounce
+#define PROACTIVE_NODEINFO_COOLDOWN_MS 300000   // 5 min (matches announcer)
+static uint32_t s_last_reactive_nodeinfo_ms  = 0;  // 0 = never sent
+static uint32_t s_last_proactive_nodeinfo_ms = 0;
 
 // ── TX side ─────────────────────────────────────────────────────────
 //
@@ -835,10 +878,12 @@ static esp_err_t send_data_frame_ch(uint8_t ch_idx, uint32_t to, uint32_t pkt_id
              ch_idx, ch->name, (unsigned long)to, (unsigned long)from,
              (unsigned long)pkt_id, ch->hash, (unsigned)total);
 
-    if (s_mqtt_tx_cb) {
+    // MonsterMesh → MQTT only. All other channels → LoRa only.
+    if (ch->hash == MESHTASTIC_MM_CHANNEL_HASH && s_mqtt_tx_cb) {
         s_mqtt_tx_cb(to, from, pkt_id, ch->hash, encrypted, data_len);
+        ESP_LOGI(TAG, "tx(ch%d) sent via MQTT", ch_idx);
+        return ESP_OK;
     }
-
     return meshtastic_lora_send_raw(pkt, total);
 }
 
@@ -884,12 +929,14 @@ static esp_err_t send_data_frame_mm(uint32_t to, uint32_t pkt_id,
              (unsigned long)to, (unsigned long)from, (unsigned long)pkt_id,
              MESHTASTIC_MM_CHANNEL_HASH, (unsigned)total);
 
-    // Session 11: also publish via MQTT if the hook is registered.
+    // MonsterMesh channel: MQTT only (LoRa fallback to be added later).
     if (s_mqtt_tx_cb) {
         s_mqtt_tx_cb(to, from, pkt_id, MESHTASTIC_MM_CHANNEL_HASH,
                      encrypted, data_len);
+        ESP_LOGI(TAG, "tx(mm) sent via MQTT");
+        return ESP_OK;
     }
-
+    // Fallback to LoRa if MQTT callback not registered
     return meshtastic_lora_send_raw(pkt, total);
 }
 
@@ -913,6 +960,19 @@ esp_err_t meshtastic_send_text(const char *text)
     // our own message gets suppressed when the drain task receives it.
     chat_push(meshtastic_proto_node_id(), pkt_id, true,
               (const uint8_t *)text, text_len, (int8_t)s_tx_channel);
+
+    // Session 12 — proactive NodeInfo: if we haven't announced recently,
+    // send our NodeInfo before the text so recipients see our name
+    // immediately. Only fires once per PROACTIVE cooldown (5 min).
+    {
+        uint32_t tnow = now_ms();
+        if (s_last_proactive_nodeinfo_ms == 0 ||
+            (tnow - s_last_proactive_nodeinfo_ms) >= PROACTIVE_NODEINFO_COOLDOWN_MS) {
+            s_last_proactive_nodeinfo_ms = tnow;
+            ESP_LOGI(TAG, "proactive NodeInfo before first text TX");
+            meshtastic_send_nodeinfo(NULL, NULL);
+        }
+    }
 
     // Build the Data protobuf:
     //   field 1 (portnum, varint) = TEXT_MESSAGE_APP
@@ -1213,16 +1273,18 @@ static void drain_task(void *arg)
                             size_t copy = d.payload_len < sizeof(entry.body) - 1
                                               ? d.payload_len
                                               : sizeof(entry.body) - 1;
-                            memcpy(entry.body, d.payload, copy);
-                            entry.body[copy] = '\0';
-                            // Strip control bytes so we never paint
-                            // garbage on the terminal. The first invalid
-                            // byte terminates the displayed string.
-                            for (size_t k = 0; k < copy; k++) {
-                                if (entry.body[k] < 0x20 || entry.body[k] == 0x7F) {
-                                    entry.body[k] = '\0';
-                                    break;
+                            // Copy only printable ASCII from the
+                            // payload — high bytes (>=0x80) from
+                            // extra protobuf fields or PKI wrapping
+                            // would show as question marks.
+                            {
+                                size_t bo = 0;
+                                for (size_t k = 0; k < copy && bo < sizeof(entry.body) - 1; k++) {
+                                    uint8_t c = (uint8_t)d.payload[k];
+                                    if (c >= 0x20 && c < 0x7F)
+                                        entry.body[bo++] = (char)c;
                                 }
+                                entry.body[bo] = '\0';
                             }
                             // Session 5: also push into chat history so
                             // the chat UI shows incoming text messages.
@@ -1232,6 +1294,28 @@ static void drain_task(void *arg)
                             chat_push(entry.header.from, entry.header.id,
                                       false, d.payload, d.payload_len,
                                       matched_ch);
+
+                            // Session 12 — reactive NodeInfo: if the sender
+                            // isn't in our NodeDB yet, send our NodeInfo
+                            // (want_response=true) to trigger their reply.
+                            // Debounced so we send at most one per cooldown.
+                            if (!relay_already_seen &&
+                                entry.header.from != meshtastic_proto_node_id()) {
+                                char probe[MESHTASTIC_NODE_NAME_SHORT];
+                                bool known = meshtastic_nodedb_lookup(
+                                    entry.header.from, NULL, 0,
+                                    probe, sizeof(probe));
+                                if (!known || probe[0] == '\0') {
+                                    uint32_t tnow = now_ms();
+                                    if (s_last_reactive_nodeinfo_ms == 0 ||
+                                        (tnow - s_last_reactive_nodeinfo_ms) >= REACTIVE_NODEINFO_COOLDOWN_MS) {
+                                        s_last_reactive_nodeinfo_ms = tnow;
+                                        ESP_LOGI(TAG, "unknown sender !%08lx — sending NodeInfo (reactive)",
+                                                 (unsigned long)entry.header.from);
+                                        meshtastic_send_nodeinfo(NULL, NULL);
+                                    }
+                                }
+                            }
                         } else if (d.portnum == MESHTASTIC_PORTNUM_NODEINFO_APP) {
                             char longn[MESHTASTIC_NODE_NAME_LONG]  = {0};
                             char shortn[MESHTASTIC_NODE_NAME_SHORT] = {0};

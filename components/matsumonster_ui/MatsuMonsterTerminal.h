@@ -43,10 +43,12 @@ public:
     void handleInput();   // drain queued events; non-blocking
     void render();        // draw current state to fb + bsp_display_blit
     bool wantsToExit() const { return wants_exit_; }
+    bool wantsChatJump() const { return wants_chat_; }
 
     // Called by main.c after wantsToExit() goes true, so the next entry
     // starts fresh.
     void clearExitFlag() { wants_exit_ = false; }
+    void clearChatJump() { wants_chat_ = false; }
 
     // Called from monster_enter_terminal on every Fn+T entry. Bails out of
     // any stale battle left running when the user exited mid-fight, and
@@ -88,6 +90,7 @@ private:
 
     // ── UI state ────────────────────────────────────────────────────────────
     bool     wants_exit_       = false;
+    bool     wants_chat_       = false;
     bool     dirty_            = true;   // scrollback / header changed — redraw left region
     bool     panel_dirty_      = true;   // side panel changed — redraw right region
     bool     input_only_dirty_ = false;  // only the input line + cursor changed (typing / blink)

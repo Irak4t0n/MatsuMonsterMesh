@@ -97,14 +97,14 @@ static void daycare_send_dm_cb(uint32_t destNodeId, const char *msg, void *ctx)
     meshtastic_send_text(msg);
 }
 
-// Session 11: MQTT TX hook — called from meshtastic_proto when a
-// MonsterMesh packet is encrypted and ready to send. Publishes the
-// same encrypted bytes to the MQTT broker as a ServiceEnvelope.
-static void mqtt_tx_hook(uint32_t to, uint32_t from, uint32_t pkt_id,
+// Session 12: MQTT TX hook — returns true if published via MQTT
+// (caller skips LoRa). Returns false to fall back to LoRa.
+static bool mqtt_tx_hook(uint32_t to, uint32_t from, uint32_t pkt_id,
                           uint8_t channel_hash,
                           const uint8_t *encrypted, size_t enc_len)
 {
-    mqtt_transport_publish(to, from, pkt_id, channel_hash, encrypted, enc_len);
+    return mqtt_transport_publish(to, from, pkt_id, channel_hash,
+                                  encrypted, enc_len) == ESP_OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,6 +282,13 @@ extern "C" void monster_daycare_tick(void)
                          (unsigned)beacon.pokemon[p].level,
                          beacon.pokemon[p].nickname);
             }
+            // Populate nodedb from beacon short name so chat shows names
+            // even without a formal NodeInfo exchange.
+            if (beacon.shortName[0]) {
+                char sn[6] = {0};
+                memcpy(sn, beacon.shortName, 5);
+                meshtastic_nodedb_upsert(beacon.nodeId, NULL, sn);
+            }
             s_daycare.handleBeacon(beacon);
         // Compact beacon (0x61) — sent by other Tanmatsu devices.
         } else if (type == DAYCARE_BEACON_TYPE_COMPACT &&
@@ -295,6 +302,11 @@ extern "C" void monster_daycare_tick(void)
             ESP_LOGI(TAG, "  compact beacon: node=!%08lx short='%.5s' party=%u",
                      (unsigned long)beacon.nodeId, beacon.shortName,
                      (unsigned)beacon.partyCount);
+            if (beacon.shortName[0]) {
+                char sn[6] = {0};
+                memcpy(sn, beacon.shortName, 5);
+                meshtastic_nodedb_upsert(beacon.nodeId, NULL, sn);
+            }
             s_daycare.handleBeacon(beacon);
         } else {
             // Everything else → battle engine (it checks PktType internally).
@@ -342,6 +354,21 @@ extern "C" bool monster_terminal_pump(void)
 
     s_terminal->handleInput();
     s_terminal->render();
+
+    // Fn+M from inside the terminal: jump straight to chat without
+    // bouncing through emulator state. Audio stays muted.
+    if (s_terminal->wantsChatJump()) {
+        s_terminal->clearChatJump();
+        s_state = MONSTER_STATE_CHAT;
+        meshtastic_chat_clear_unread();
+        if (s_chat) {
+            s_chat->clearExitFlag();
+            s_chat->clearTerminalJump();
+            s_chat->begin();
+        }
+        ESP_LOGI(TAG, "state -> CHAT (from TERMINAL)");
+        return true;
+    }
 
     if (s_terminal->wantsToExit()) {
         s_terminal->clearExitFlag();

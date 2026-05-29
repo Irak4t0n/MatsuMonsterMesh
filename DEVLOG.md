@@ -9,6 +9,38 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 29 2026 — MQTT interop fix, NodeDB persistence, Fn+M from terminal (Session 12)
+
+### Changes
+- **MQTT proto field fix**: corrected MeshPacket protobuf field numbers to match
+  official Meshtastic mesh.proto — hop_limit (10->9), via_mqtt (16->14),
+  hop_start (17->15). This was the root cause of remote friends not being able
+  to decode our direct MQTT packets.
+- **Channel-based TX routing**: MonsterMesh channel sends via MQTT only;
+  all other channels (LongFast, etc.) send via LoRa only. MQTT TX callback
+  returns bool for success/failure reporting.
+- **NodeDB NVS persistence**: node names (short + long) now survive reboots.
+  Loaded on boot, saved on every NodeInfo upsert. ~1.3KB blob (32 entries).
+- **Beacon-to-NodeDB**: DaycareBeacon payloads contain the sender's short name;
+  now upserted into the nodedb so chat displays names even without a formal
+  NodeInfo exchange (common with T-Deck relay nodes that rate-limit NodeInfo).
+- **Fn+M from terminal**: pressing Fn+M in the terminal jumps directly to the
+  chat view (previously only accessible from the emulator). Mirrors the existing
+  Fn+T shortcut that jumps from chat to terminal. Audio stays muted for both.
+- **MQTT RX decoder**: updated to parse correct field numbers (9/14/15) so
+  incoming MQTT packets from standard Meshtastic devices are decoded properly.
+
+### Technical notes
+- Official Meshtastic MeshPacket fields verified via
+  `meshtastic/protobufs/master/meshtastic/mesh.proto`: encrypted=5, channel=3,
+  id=6, hop_limit=9, want_ack=10, priority=11, via_mqtt=14, hop_start=15
+- NodeDB struct is 41 bytes/entry × 32 = ~1.3KB, stored as NVS blob in
+  namespace "mesh_nodedb". `last_seen_ms` reset to 0 on load (relative time).
+- State machine now supports: EMU->TERM (Fn+T), EMU->CHAT (Fn+M),
+  TERM->EMU (Fn+T/ESC), TERM->CHAT (Fn+M), CHAT->EMU (ESC), CHAT->TERM (Fn+T)
+
+---
+
 ## Session May 29 2026 — Chat wrapping, presets, unread badge, clear/reset (Session 11 cont.)
 
 ### Changes

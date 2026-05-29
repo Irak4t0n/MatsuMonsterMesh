@@ -6,7 +6,7 @@ This project "MatsuMonsterMesh" combines two things:
 
 Players use LoRa radio to exchange daycare beacons and battle over the mesh — no internet required. The emulator's live SRAM is the source of truth for party data.
 
-## Current State (Session 11)
+## Current State (Session 12)
 
 - GBC emulation at ~60 FPS with save states, rewind, fast forward
 - Bidirectional daycare interop with upstream MonsterMesh on T-Deck verified on hardware
@@ -17,13 +17,17 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - Terminal commands: ch_list, ch_add, ch_del, ch_set, ch_reset, clear for channel management
 - Chat UI side panel showing channel list, active channel info, node count, MQTT status
 - Fn+1..8 hotkeys in chat UI to switch active TX channel
-- MQTT transport: WiFi auto-connect, TLS to EMQX broker, TX hook publishes beacons, RX logging
+- MQTT transport: WiFi auto-connect, TLS to EMQX broker, channel-based routing (MonsterMesh=MQTT, others=LoRa)
+- MQTT ServiceEnvelope encoding with correct Meshtastic proto field numbers (verified against official mesh.proto)
+- MQTT RX: ServiceEnvelope decoding, hop_limit=0 injection to prevent LoRa relay of MQTT packets
 - mqtt_status terminal command for on-device MQTT/WiFi diagnostics
 - Channel presets: `ch_add <name> default` uses standard Meshtastic PSK
 - Unread message badge in emulator overlay (top-right `[N] Fn+M`)
 - Chat message wrapping: long messages wrap to multiple visual lines
 - Full 122-byte DaycareBeacon TX matching upstream struct (including ngPlusTier field)
 - Meshtastic chat UI (Fn+M) and terminal (Fn+T) both functional
+- Fn+M from terminal jumps directly to chat; Fn+T from chat jumps to terminal
+- NodeDB persisted to NVS across reboots; also populated from DaycareBeacon short names
 - Daycare auto-check-in from live emulator SRAM on ROM load
 - Gen 2 (Crystal/Gold/Silver) support: live WRAM party reading, daycare check-in, battle with move filtering
 - Terminal + chat input lines scroll horizontally when text overflows the left panel

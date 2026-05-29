@@ -416,6 +416,12 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
         wants_exit_ = true;
         return;
     }
+    // Fn+M jumps to the chat view.
+    if ((modifiers & BSP_INPUT_MODIFIER_FUNCTION) &&
+        (ascii == 'm' || ascii == 'M')) {
+        wants_chat_ = true;
+        return;
+    }
     // Alt+M → reboot into the Tanmatsu Meshtastic UI app. Same shortcut
     // main.c registers for the emulator state — duplicated here so the
     // user can swap apps without first leaving the terminal.

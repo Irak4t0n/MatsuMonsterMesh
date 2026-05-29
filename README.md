@@ -37,6 +37,9 @@ goes through a `MeshtasticRadio` interface; cart RAM goes through an
 You hit **Fn+T** during emulation to drop into the MonsterMesh terminal,
 where commands like `party`, `status`, `fight <name>`, and `run` drive
 the daycare and battle systems against other Tanmatsu users on the mesh.
+**Fn+M** opens the Meshtastic chat view, and you can jump directly
+between terminal and chat with Fn+T / Fn+M without returning to the
+emulator.
 
 ## Hardware
 
@@ -93,7 +96,8 @@ in the badge-bsp managed component for the full pin map.
   Channel-aware TX/RX with per-channel AES encryption. Terminal commands
   (`ch_list`, `ch_add`, `ch_del`, `ch_set`) and Fn+1..8 hotkeys in the
   chat UI for switching
-- **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB,
+- **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB
+  (persisted to NVS across reboots, also populated from beacon data),
   channel registry decryption (iterates all registered keys),
   TEXT_MESSAGE_APP + PRIVATE_APP portnum routing
 - **Chat UI** (Fn+M): full Meshtastic chat view with compose bar
@@ -101,7 +105,9 @@ in the badge-bsp managed component for the full pin map.
   channel list / MQTT status / node count, and in-emulator notification
   overlay with unread message badge
 - **MQTT transport**: WiFi auto-connect, TLS to EMQX broker,
-  TX hook publishes daycare beacons, RX injection into LoRa pipeline,
+  channel-based routing (MonsterMesh channel = MQTT, others = LoRa),
+  ServiceEnvelope encoding matching official Meshtastic proto,
+  RX injection into LoRa pipeline with hop_limit=0 to prevent relay,
   auto-reconnect on WiFi drop. `mqtt_status` terminal command for
   on-device diagnostics
 - **Daycare ↔ mesh**: beacon TX/RX, broadcast text, DM callbacks
