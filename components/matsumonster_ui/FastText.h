@@ -28,6 +28,12 @@ void fast_text_blit(pax_buf_t *fb, int lx, int ly, const char *text,
 int fast_text_glyph_w(void);
 int fast_text_glyph_h(void);
 
+// Draw a horizontal line directly into the raw framebuffer.
+void fast_hline(pax_buf_t *fb, int lx0, int lx1, int ly, uint32_t color_argb);
+
+// Fill a small rectangle directly into the raw framebuffer.
+void fast_rect(pax_buf_t *fb, int lx, int ly, int lw, int lh, uint32_t color_argb);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1019,7 +1019,7 @@ void MatsuMonsterTerminal::cmdLoraStats()
 {
     meshtastic_lora_stats_t s;
     meshtastic_lora_get_stats(&s);
-    println("── LoRa stats ──");
+    println("-- LoRa stats --");
     printf_line("  init_ok        %u", (unsigned)s.init_ok);
     printf_line("  configs        %u", (unsigned)s.configs_applied);
     printf_line("  tx attempted   %u", (unsigned)s.tx_attempted);
@@ -1028,7 +1028,7 @@ void MatsuMonsterTerminal::cmdLoraStats()
     printf_line("  rx packets     %u", (unsigned)s.rx_packets);
     printf_line("  rx bytes total %u", (unsigned)s.rx_bytes_total);
     printf_line("  relay sent     %u", (unsigned)meshtastic_proto_total_relayed());
-    println("── Diagnostics ──");
+    println("-- Diagnostics --");
     printf_line("  init_err=%d  ms=%u",  (int)s.last_init_err,
                 (unsigned)s.last_init_ms);
     printf_line("  cfg_err=%d   ms=%u",  (int)s.last_config_err,
@@ -1067,7 +1067,7 @@ void MatsuMonsterTerminal::cmdLoraProbe()
                     (int)r.entries[i].result);
     }
     if (r.cur_frequency > 0) {
-        println("── C6 current config ──");
+        println("-- C6 current config --");
         printf_line("  freq    %u Hz",  (unsigned)r.cur_frequency);
         printf_line("  SF      %u",     (unsigned)r.cur_sf);
         printf_line("  BW      %u kHz", (unsigned)r.cur_bw);
@@ -1105,7 +1105,7 @@ void MatsuMonsterTerminal::cmdMeshRecent()
 {
     meshtastic_recent_entry_t entries[MESHTASTIC_RECENT_DEPTH];
     size_t n = meshtastic_proto_recent(entries, MESHTASTIC_RECENT_DEPTH);
-    printf_line("── mesh_recent (parsed %u total) ──",
+    printf_line("-- mesh_recent (parsed %u total) --",
                 (unsigned)meshtastic_proto_total_parsed());
     if (n == 0) {
         println("(no packets yet — wait for T-Deck Plus to broadcast)");
@@ -1160,7 +1160,7 @@ void MatsuMonsterTerminal::cmdMeshMessages()
 {
     meshtastic_recent_entry_t entries[MESHTASTIC_RECENT_DEPTH];
     size_t n = meshtastic_proto_recent(entries, MESHTASTIC_RECENT_DEPTH);
-    println("── mesh_messages (text only) ──");
+    println("-- mesh_messages (text only) --");
     uint32_t now_ms_v = (uint32_t)(esp_timer_get_time() / 1000ULL);
     size_t shown = 0;
     for (size_t i = 0; i < n; i++) {
@@ -1183,7 +1183,7 @@ void MatsuMonsterTerminal::cmdMeshNodes()
 {
     meshtastic_node_entry_t nodes[MESHTASTIC_NODEDB_CAP];
     size_t n = meshtastic_nodedb_snapshot(nodes, MESHTASTIC_NODEDB_CAP);
-    printf_line("── mesh_nodes (%u known) ──", (unsigned)n);
+    printf_line("-- mesh_nodes (%u known) --", (unsigned)n);
     if (n == 0) {
         println("(no nodes seen yet)");
         return;
@@ -1381,7 +1381,8 @@ void MatsuMonsterTerminal::render()
         drawInputLine();
 
         if (panel_dirty_) {
-            pax_draw_rect(fb_, COLOR_BG, panel_x, 0, PANEL_W, canvas_h_);
+            // Clear panel region: physical rows panel_x..canvas_w_-1
+            memset(raw + panel_x * 480, 0, PANEL_W * 480 * sizeof(uint16_t));
             drawSidePanel();
         }
         bsp_display_blit(0, 0, canvas_h_, canvas_w_, pax_buf_get_pixels(fb_));
@@ -1410,14 +1411,9 @@ void MatsuMonsterTerminal::drawHeader()
              "[serial radio]"
 #endif
             );
-    pax_draw_text(fb_, COLOR_HEADER, pax_font_sky_mono, FONT_PX,
-                  MARGIN_X, HEADER_Y, hdr);
-
-    // Separator under header — only spans the LEFT (scrollback) region;
-    // the side panel draws its own internal separators.
-    pax_draw_line(fb_, COLOR_DIM,
-                  MARGIN_X, HEADER_H,
-                  canvas_w_ - PANEL_W - 4, HEADER_H);
+    int panel_x = canvas_w_ - PANEL_W;
+    fast_text_blit(fb_, MARGIN_X, HEADER_Y, hdr, COLOR_HEADER, panel_x);
+    fast_hline(fb_, MARGIN_X, panel_x - 4, HEADER_H, COLOR_DIM);
 }
 
 void MatsuMonsterTerminal::drawScrollback()
@@ -1490,31 +1486,18 @@ void MatsuMonsterTerminal::drawScrollbackFast()
 void MatsuMonsterTerminal::drawInputLine()
 {
     int y = canvas_h_ - INPUT_H;
+    int panel_x = canvas_w_ - PANEL_W;
+    int gw = fast_text_glyph_w();
 
-    // Separator + prompt span the LEFT region only — the side panel
-    // owns the area from (canvas_w_ - PANEL_W) onwards.
-    pax_draw_line(fb_, COLOR_DIM,
-                  MARGIN_X, y - 2,
-                  canvas_w_ - PANEL_W - 4, y - 2);
+    fast_hline(fb_, MARGIN_X, panel_x - 4, y - 2, COLOR_DIM);
 
-    // Measure the prompt's actual rendered width so the input text follows
-    // it exactly (pax_font_sky_mono is wider than my old hardcoded 7px/glyph
-    // assumption, which left the cursor lagging behind the typed text).
-    pax_vec2f prompt_size = pax_text_size(pax_font_sky_mono, FONT_PX, "> ");
-    int input_x = MARGIN_X + (int)prompt_size.x;
-
-    pax_draw_text(fb_, COLOR_PROMPT, pax_font_sky_mono, FONT_PX,
-                  MARGIN_X, y, "> ");
-    pax_draw_text(fb_, COLOR_INPUT, pax_font_sky_mono, FONT_PX,
-                  input_x, y, input_buf_);
+    int input_x = MARGIN_X + gw * 2;  // "> " = 2 glyph widths
+    fast_text_blit(fb_, MARGIN_X, y, "> ", COLOR_PROMPT, panel_x);
+    fast_text_blit(fb_, input_x, y, input_buf_, COLOR_INPUT, panel_x);
 
     if (cursor_on_) {
-        // Place cursor at the actual end of the rendered input — measured,
-        // not estimated. Fixes the "cursor stays held up before the last
-        // few letters" symptom.
-        pax_vec2f input_size = pax_text_size(pax_font_sky_mono, FONT_PX, input_buf_);
-        int cx = input_x + (int)input_size.x;
-        pax_draw_rect(fb_, COLOR_CURSOR, cx, y + 2, 6, FONT_PX);
+        int cx = input_x + input_len_ * gw;
+        fast_rect(fb_, cx, y + 2, 6, FONT_PX, COLOR_CURSOR);
     }
 }
 
@@ -1531,8 +1514,12 @@ void MatsuMonsterTerminal::drawSidePanel()
     int bottom = canvas_h_ - 4;
     int right  = canvas_w_ - 4;
 
-    // Vertical separator between scrollback and panel
-    pax_draw_line(fb_, COLOR_DIM, px, top, px, bottom);
+    // Vertical separator — draw as a 1px-wide column directly
+    uint16_t *raw = (uint16_t *)pax_buf_get_pixels(fb_);
+    uint16_t dim565 = (uint16_t)(((0x70>>3)<<11)|((0x70>>2)<<5)|(0x70>>3));
+    int base = px * 480 + (480 - 1 - top);
+    for (int ly = top; ly <= bottom; ly++)
+        raw[base - (ly - top)] = dim565;
 
     int x = px + 8;
     int y = top + 2;
@@ -1546,14 +1533,11 @@ void MatsuMonsterTerminal::drawSidePanel()
 
 void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
 {
-    // Section title
-    pax_draw_text(fb_, COLOR_HEADER, pax_font_sky_mono, FONT_PX,
-                  x, y, "── BATTLE ──");
+    fast_text_blit(fb_, x, y, "-- BATTLE --", COLOR_HEADER, right);
     y += LINE_PX + 2;
 
     if (battle_->phase() == MonsterMeshTextBattle::Phase::WAIT_PARTY) {
-        pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX,
-                      x, y, "Exchanging parties...");
+        fast_text_blit(fb_, x, y, "Exchanging parties...", COLOR_DIM, right);
         return;
     }
     const auto &eng = battle_->engine();
@@ -1564,75 +1548,61 @@ void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
     const auto &me   = mp.mons[mp.active];
     const auto &foe  = fp.mons[fp.active];
 
-    // Player line: nickname + level
     char buf[64];
     snprintf(buf, sizeof(buf), "You: %.10s L%u",
              me.nickname[0] ? me.nickname : "???", (unsigned)me.level);
-    pax_draw_text(fb_, COLOR_TEXT, pax_font_sky_mono, FONT_PX, x, y, buf);
+    fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
     y += LINE_PX;
 
-    // HP line — colour-coded by ratio so a quick glance shows danger.
     uint32_t hp_color = COLOR_TEXT;
     if (me.maxHp > 0) {
         uint32_t pct = (uint32_t)me.hp * 100u / me.maxHp;
-        if      (pct <= 25) hp_color = 0xFFFF5050;   // red
-        else if (pct <= 50) hp_color = 0xFFFFCC40;   // amber
-        else                hp_color = 0xFF60E060;   // green
+        if      (pct <= 25) hp_color = 0xFFFF5050;
+        else if (pct <= 50) hp_color = 0xFFFFCC40;
+        else                hp_color = 0xFF60E060;
     }
     snprintf(buf, sizeof(buf), "HP %u/%u", (unsigned)me.hp, (unsigned)me.maxHp);
-    pax_draw_text(fb_, hp_color, pax_font_sky_mono, FONT_PX, x, y, buf);
+    fast_text_blit(fb_, x, y, buf, hp_color, right);
     y += LINE_PX + 4;
 
-    // Moves block — 1..4. Each move takes 2 lines: "n) Name" then
-    // indented "Type P:pp PP:cur/max".
     for (int i = 0; i < 4; ++i) {
         if (me.moves[i] == 0) {
             snprintf(buf, sizeof(buf), "%d) ---", i + 1);
-            pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX,
-                          x, y, buf);
+            fast_text_blit(fb_, x, y, buf, COLOR_DIM, right);
             y += LINE_PX * 2;
             continue;
         }
         const Gen1MoveData *m = gen1Move(me.moves[i]);
         if (!m) {
             snprintf(buf, sizeof(buf), "%d) #%u", i + 1, (unsigned)me.moves[i]);
-            pax_draw_text(fb_, COLOR_TEXT, pax_font_sky_mono, FONT_PX,
-                          x, y, buf);
+            fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
             y += LINE_PX * 2;
             continue;
         }
-        // Greyed if out of PP — engine refuses to use it.
         uint32_t name_color = (me.pp[i] == 0) ? COLOR_DIM : COLOR_INPUT;
         snprintf(buf, sizeof(buf), "%d) %.14s", i + 1, m->name);
-        pax_draw_text(fb_, name_color, pax_font_sky_mono, FONT_PX, x, y, buf);
+        fast_text_blit(fb_, x, y, buf, name_color, right);
         y += LINE_PX;
         snprintf(buf, sizeof(buf), "   PP %u/%u",
                  (unsigned)me.pp[i], (unsigned)m->pp);
-        pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX, x, y, buf);
+        fast_text_blit(fb_, x, y, buf, COLOR_DIM, right);
         y += LINE_PX;
     }
 
     y += 4;
-
-    // Hotkey hints — mirrors the line printed in the scrollback at battle
-    // start, so the user can find them again without scrolling.
-    pax_draw_text(fb_, COLOR_PROMPT, pax_font_sky_mono, FONT_PX,
-                  x, y, "S=switch  F=flee");
+    fast_text_blit(fb_, x, y, "S=switch  F=flee", COLOR_PROMPT, right);
     y += LINE_PX;
-    pax_draw_text(fb_, COLOR_PROMPT, pax_font_sky_mono, FONT_PX,
-                  x, y, "type 'catch' to net");
+    fast_text_blit(fb_, x, y, "type 'catch' to net", COLOR_PROMPT, right);
     y += LINE_PX;
-    pax_draw_text(fb_, COLOR_PROMPT, pax_font_sky_mono, FONT_PX,
-                  x, y, "ESC=forfeit");
+    fast_text_blit(fb_, x, y, "ESC=forfeit", COLOR_PROMPT, right);
     y += LINE_PX + 4;
 
-    // Foe block
-    pax_draw_line(fb_, COLOR_DIM, x, y, right - 8, y);
+    fast_hline(fb_, x, right - 8, y, COLOR_DIM);
     y += 4;
     snprintf(buf, sizeof(buf), "Foe: %.10s L%u",
              foe.nickname[0] ? foe.nickname : speciesName(foe.species),
              (unsigned)foe.level);
-    pax_draw_text(fb_, COLOR_TEXT, pax_font_sky_mono, FONT_PX, x, y, buf);
+    fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
     y += LINE_PX;
     uint32_t foe_color = COLOR_TEXT;
     if (foe.maxHp > 0) {
@@ -1642,7 +1612,7 @@ void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
         else                foe_color = 0xFF60E060;
     }
     snprintf(buf, sizeof(buf), "HP %u/%u", (unsigned)foe.hp, (unsigned)foe.maxHp);
-    pax_draw_text(fb_, foe_color, pax_font_sky_mono, FONT_PX, x, y, buf);
+    fast_text_blit(fb_, x, y, buf, foe_color, right);
 }
 
 void MatsuMonsterTerminal::refreshPanelParty()
@@ -1666,16 +1636,13 @@ void MatsuMonsterTerminal::drawIdlePanel(int x, int y, int right)
 {
     char buf[64];
 
-    // ── Party (uses cached data from refreshPanelParty) ──
-    pax_draw_text(fb_, COLOR_HEADER, pax_font_sky_mono, FONT_PX,
-                  x, y, "── PARTY ──");
+    fast_text_blit(fb_, x, y, "-- PARTY --", COLOR_HEADER, right);
     y += LINE_PX + 2;
 
     const Gen1Party &party = cached_panel_party_;
     uint8_t n = cached_panel_party_count_;
     if (n == 0) {
-        pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX,
-                      x, y, "(no save data)");
+        fast_text_blit(fb_, x, y, "(no save data)", COLOR_DIM, right);
         y += LINE_PX + 4;
     } else {
         for (uint8_t i = 0; i < n && i < 6; ++i) {
@@ -1685,8 +1652,7 @@ void MatsuMonsterTerminal::drawIdlePanel(int x, int y, int right)
                                    : speciesName(m.species);
             snprintf(buf, sizeof(buf), "%u. %.10s L%u",
                      (unsigned)(i + 1), nick, (unsigned)m.level);
-            pax_draw_text(fb_, COLOR_TEXT, pax_font_sky_mono, FONT_PX,
-                          x, y, buf);
+            fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
             y += LINE_PX;
 
             uint16_t hp    = ((uint16_t)m.hp[0]    << 8) | m.hp[1];
@@ -1701,18 +1667,15 @@ void MatsuMonsterTerminal::drawIdlePanel(int x, int y, int right)
             }
             snprintf(buf, sizeof(buf), "   HP %u/%u", (unsigned)hp,
                      (unsigned)maxHp);
-            pax_draw_text(fb_, hp_color, pax_font_sky_mono, FONT_PX,
-                          x, y, buf);
+            fast_text_blit(fb_, x, y, buf, hp_color, right);
             y += LINE_PX + 2;
         }
     }
 
-    // ── Command cheatsheet ──
     y += 4;
-    pax_draw_line(fb_, COLOR_DIM, x, y, right - 8, y);
+    fast_hline(fb_, x, right - 8, y, COLOR_DIM);
     y += 4;
-    pax_draw_text(fb_, COLOR_HEADER, pax_font_sky_mono, FONT_PX,
-                  x, y, "── COMMANDS ──");
+    fast_text_blit(fb_, x, y, "-- COMMANDS --", COLOR_HEADER, right);
     y += LINE_PX + 2;
 
     static const char *kCmds[] = {
@@ -1724,13 +1687,11 @@ void MatsuMonsterTerminal::drawIdlePanel(int x, int y, int right)
         "quit       exit term",
     };
     for (size_t i = 0; i < sizeof(kCmds) / sizeof(kCmds[0]); ++i) {
-        pax_draw_text(fb_, COLOR_TEXT, pax_font_sky_mono, FONT_PX,
-                      x, y, kCmds[i]);
+        fast_text_blit(fb_, x, y, kCmds[i], COLOR_TEXT, right);
         y += LINE_PX;
     }
     y += 4;
-    pax_draw_text(fb_, COLOR_PROMPT, pax_font_sky_mono, FONT_PX,
-                  x, y, "Fn+T / ESC = exit");
+    fast_text_blit(fb_, x, y, "Fn+T / ESC = exit", COLOR_PROMPT, right);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

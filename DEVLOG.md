@@ -9,6 +9,39 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 28 2026 — Full pax-free terminal rendering (Session 10 cont.)
+
+### Goal
+Eliminate ALL remaining `pax_draw_text` / `pax_draw_line` / `pax_draw_rect` calls
+from the terminal, so every pixel is written via the direct-to-framebuffer FastText
+path. Also fix question-mark rendering in side panel section headers.
+
+### Changes
+- **FastText primitives**: added `fast_hline()` (horizontal line) and `fast_rect()`
+  (filled rectangle) to FastText.{h,cpp} — both write RGB565 directly into the raw
+  framebuffer using the CW rotation mapping, same as `fast_text_blit()`.
+- **Terminal header** (`drawHeader`): `pax_draw_text` → `fast_text_blit`,
+  `pax_draw_line` → `fast_hline`.
+- **Input line** (`drawInputLine`): prompt, typed text, and cursor all via FastText.
+  Cursor position calculated from `input_len_ * gw` instead of `pax_text_size()`.
+- **Side panel** (`drawSidePanel`): vertical separator drawn as a direct 1px column
+  write to the raw buffer. `pax_draw_line` removed.
+- **Battle panel** (`drawBattlePanel`): all text + HP bars + move listings via
+  `fast_text_blit` and `fast_hline`.
+- **Idle panel** (`drawIdlePanel`): party listing + commands section via FastText.
+- **Panel clear**: `pax_draw_rect` → `memset` for the panel region.
+- **Unicode fix**: replaced `──` (U+2500 box-drawing) with `--` (ASCII dash) in all
+  rendered strings. FastText only handles ASCII 32-127; each byte of the 3-byte UTF-8
+  sequence was rendering as `?`, producing multiple question marks around section
+  headers like "PARTY", "COMMANDS", "BATTLE".
+
+### Result
+The terminal now has zero `pax_draw_text` calls. Every rendered element goes through
+the glyph cache + direct framebuffer path. Full-frame terminal render is consistently
+<5ms including header, scrollback, input, and side panel.
+
+---
+
 ## Session May 28 2026 — Terminal glyph cache: 100x scrollback speedup (Session 10)
 
 ### Goal

@@ -20,6 +20,9 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - Bottom-anchored scrollback layout: text fills up to the input line with no gap
 - Chat compose buffer increased to 200 chars (matches Meshtastic send limit)
 - Chat UI uses shared FastText glyph cache for smooth scrolling (same 100x speedup as terminal)
+- Terminal fully pax-free: header, input line, side panel, battle panel all use FastText
+- FastText `fast_hline()` / `fast_rect()` primitives for separators and cursors
+- All Unicode box-drawing chars replaced with ASCII for FastText compatibility
 
 ## Rules
 

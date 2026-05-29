@@ -105,3 +105,27 @@ void fast_text_blit(pax_buf_t *fb, int lx, int ly, const char *text,
 
 int fast_text_glyph_w(void) { return s_gw; }
 int fast_text_glyph_h(void) { return s_gh; }
+
+void fast_hline(pax_buf_t *fb, int lx0, int lx1, int ly, uint32_t color_argb)
+{
+    if (!fb || ly < 0 || ly >= PHYS_W) return;
+    uint16_t *raw   = (uint16_t *)pax_buf_get_pixels(fb);
+    uint16_t  color = argb_to_565(color_argb);
+    int col = PHYS_W - 1 - ly;
+    for (int lx = lx0; lx <= lx1; lx++) {
+        raw[lx * PHYS_W + col] = color;
+    }
+}
+
+void fast_rect(pax_buf_t *fb, int lx, int ly, int lw, int lh, uint32_t color_argb)
+{
+    if (!fb) return;
+    uint16_t *raw   = (uint16_t *)pax_buf_get_pixels(fb);
+    uint16_t  color = argb_to_565(color_argb);
+    for (int gx = 0; gx < lw; gx++) {
+        int base = (lx + gx) * PHYS_W + (PHYS_W - 1 - ly);
+        for (int gy = 0; gy < lh; gy++) {
+            raw[base - gy] = color;
+        }
+    }
+}
