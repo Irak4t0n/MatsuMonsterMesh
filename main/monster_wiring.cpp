@@ -21,6 +21,7 @@
 #include "emulator_sram_iface.h"
 #include "gnuboy_sram.h"
 #include "DaycareSavPatcher.h"   // gen1CharToAscii + SAV_* constants
+#include "mqtt_transport.h"      // Session 11: MQTT bridge
 
 static const char *TAG = "MMWire";
 
@@ -96,6 +97,16 @@ static void daycare_send_dm_cb(uint32_t destNodeId, const char *msg, void *ctx)
     meshtastic_send_text(msg);
 }
 
+// Session 11: MQTT TX hook — called from meshtastic_proto when a
+// MonsterMesh packet is encrypted and ready to send. Publishes the
+// same encrypted bytes to the MQTT broker as a ServiceEnvelope.
+static void mqtt_tx_hook(uint32_t to, uint32_t from, uint32_t pkt_id,
+                          uint8_t channel_hash,
+                          const uint8_t *encrypted, size_t enc_len)
+{
+    mqtt_transport_publish(to, from, pkt_id, channel_hash, encrypted, enc_len);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" void monster_init(pax_buf_t *fb, int canvas_w, int canvas_h,
@@ -129,6 +140,12 @@ extern "C" void monster_init(pax_buf_t *fb, int canvas_w, int canvas_h,
     // callback. Degrades gracefully if the LoRa layer didn't come up
     // (sendPacket returns false, pollPackets returns 0).
     s_radio.begin();
+
+    // Session 11: start WiFi + MQTT in background. Non-blocking — the
+    // emulator starts immediately; MQTT connects when WiFi is ready.
+    // Register the TX hook so every MonsterMesh packet also goes to MQTT.
+    meshtastic_proto_set_mqtt_tx_cb(mqtt_tx_hook);
+    mqtt_transport_init();
 
     s_daycare.init();   // zero-init state, magic, partyCount=0 → tick() is a no-op until checkIn
     s_daycare.setSendBeacon(daycare_send_beacon_cb, nullptr);

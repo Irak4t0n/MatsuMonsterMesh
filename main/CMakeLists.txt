@@ -29,6 +29,7 @@ idf_component_register(
         meshtastic_proto       # Path #3 Session 2a: Meshtastic header parser
         monster_core
         matsumonster_ui
+        mqtt_transport         # Session 11: WiFi + MQTT bridge
 		${extra_requires}
 	INCLUDE_DIRS
 		"."

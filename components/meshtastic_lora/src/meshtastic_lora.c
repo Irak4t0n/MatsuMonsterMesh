@@ -326,6 +326,20 @@ bool meshtastic_lora_pop_raw(uint8_t *out_buf, size_t max_len, size_t *out_len)
     return true;
 }
 
+bool meshtastic_lora_push_raw(const uint8_t *data, size_t len)
+{
+    if (!data || len == 0 || len > ML_RAW_MAX_LEN || !s_raw_out_q) return false;
+    raw_out_t out;
+    out.length = (uint8_t)len;
+    memcpy(out.data, data, len);
+    if (xQueueSend(s_raw_out_q, &out, 0) != pdTRUE) {
+        raw_out_t drop;
+        xQueueReceive(s_raw_out_q, &drop, 0);
+        xQueueSend(s_raw_out_q, &out, 0);
+    }
+    return true;
+}
+
 void meshtastic_lora_get_stats(meshtastic_lora_stats_t *out)
 {
     if (!out) return;

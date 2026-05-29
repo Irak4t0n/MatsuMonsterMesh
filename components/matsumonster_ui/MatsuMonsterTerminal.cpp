@@ -51,6 +51,7 @@ static inline bool mm_restart_to_meshtastic(void) {
 #include "DaycareData.h"        // daycareSpeciesNames[]
 #include "DaycareSavPatcher.h"  // buildGen1Party, readPartyFromWRAM
 #include "PokemonData.h"        // Gen1Party
+#include "mqtt_transport.h"     // mqtt_transport_is_connected()
 
 // ── Layout constants (logical px) ───────────────────────────────────────────
 static constexpr int   FONT_PX      = 12;     // pax font size in px
@@ -594,6 +595,11 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "mesh_nodes", &args)) cmdMeshNodes();
     else if (starts_with(cmd, "daycare_beacon", &args)) cmdDaycareBeacon();
     else if (starts_with(cmd, "lora_tx_test", &args)) cmdLoraTxTest(args);
+    else if (starts_with(cmd, "mqtt_status", &args)) cmdMqttStatus();
+    else if (starts_with(cmd, "ch_list", &args))    cmdChList();
+    else if (starts_with(cmd, "ch_add",  &args))    cmdChAdd(args);
+    else if (starts_with(cmd, "ch_del",  &args))    cmdChDel(args);
+    else if (starts_with(cmd, "ch_set",  &args))    cmdChSet(args);
     else if (starts_with(cmd, "quit",   &args))  cmdQuit();
     else if (starts_with(cmd, "exit",   &args))  cmdQuit();
     else if (starts_with(cmd, "help",   &args))  cmdHelp();
@@ -620,6 +626,11 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  mesh_nodes    — list nodes we've heard NodeInfo from");
     println("  daycare_beacon— force an immediate daycare beacon broadcast");
     println("  lora_tx_test N— send N-byte dummy packet (find TX size limit)");
+    println("  mqtt_status   — show MQTT/WiFi connection state");
+    println("  ch_list       — list configured channels");
+    println("  ch_add <n> <k>— add channel (name, 16-byte hex PSK)");
+    println("  ch_del <N>    — remove channel N (1-8)");
+    println("  ch_set <N>    — set active TX channel (1-8)");
     println("  quit          — back to emulator");
 }
 
@@ -1351,6 +1362,139 @@ void MatsuMonsterTerminal::cmdLoraTxTest(const char *args)
     }
 }
 
+void MatsuMonsterTerminal::cmdMqttStatus()
+{
+    bool wifi = mqtt_transport_wifi_up();
+    bool mqtt = mqtt_transport_is_connected();
+    println("-- MQTT status --");
+    printf_line("  WiFi: %s", wifi ? "connected" : "not connected");
+    printf_line("  MQTT: %s", mqtt ? "CONNECTED" : "not connected");
+    ESP_LOGI("mqtt_cmd", "mqtt_status: wifi=%d mqtt=%d", wifi, mqtt);
+}
+
+void MatsuMonsterTerminal::cmdChList()
+{
+    println("-- Channels --");
+    uint8_t active = meshtastic_channel_get_tx();
+    for (int i = 0; i < MESHTASTIC_MAX_CHANNELS; i++) {
+        const meshtastic_channel_t *ch = meshtastic_channel_get(i);
+        if (!ch) continue;
+        printf_line("  %s%d: %-16s hash=0x%02X psk=%dB",
+                    (i == active) ? ">" : " ",
+                    i + 1, ch->name, ch->hash, ch->psk_len);
+    }
+    printf_line("  Active TX: %d", active + 1);
+}
+
+// Parse hex string into bytes. Returns number of bytes parsed.
+static int hex_to_bytes(const char *hex, uint8_t *out, int max_out)
+{
+    int n = 0;
+    while (*hex && n < max_out) {
+        // Skip spaces
+        while (*hex == ' ') hex++;
+        if (!*hex) break;
+
+        uint8_t hi = 0, lo = 0;
+        char c = *hex++;
+        if (c >= '0' && c <= '9') hi = (uint8_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') hi = (uint8_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') hi = (uint8_t)(c - 'A' + 10);
+        else return -1;
+
+        c = *hex++;
+        if (c >= '0' && c <= '9') lo = (uint8_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') lo = (uint8_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') lo = (uint8_t)(c - 'A' + 10);
+        else return -1;
+
+        out[n++] = (uint8_t)((hi << 4) | lo);
+    }
+    return n;
+}
+
+void MatsuMonsterTerminal::cmdChAdd(const char *args)
+{
+    if (!args || !*args) {
+        println("Usage: ch_add <name> <hex-psk>");
+        println("  PSK: 32 hex chars (16 bytes)");
+        println("  Example: ch_add MyChannel d4f1bb3a20290759f0bcffabcf4e6901");
+        return;
+    }
+    // Split into name and PSK at first space after name
+    char name[MESHTASTIC_CHANNEL_NAME_MAX] = {};
+    const char *p = args;
+    int ni = 0;
+    while (*p && *p != ' ' && ni < (int)sizeof(name) - 1) {
+        name[ni++] = *p++;
+    }
+    name[ni] = '\0';
+    while (*p == ' ') p++;
+
+    uint8_t psk[32] = {};
+    uint8_t psk_len = 0;
+    if (*p) {
+        int n = hex_to_bytes(p, psk, 32);
+        if (n != 16 && n != 32) {
+            println("PSK must be 16 or 32 bytes (32 or 64 hex chars)");
+            return;
+        }
+        psk_len = (uint8_t)n;
+    }
+
+    int idx = meshtastic_channel_add(name, psk, psk_len);
+    if (idx < 0) {
+        println("Channel table full (max 8)");
+    } else {
+        const meshtastic_channel_t *ch = meshtastic_channel_get(idx);
+        printf_line("Added channel %d: %s (hash=0x%02X)",
+                    idx + 1, ch->name, ch->hash);
+    }
+}
+
+void MatsuMonsterTerminal::cmdChDel(const char *args)
+{
+    if (!args || !*args) {
+        println("Usage: ch_del <N>  (1-8)");
+        return;
+    }
+    int idx = atoi(args) - 1;
+    if (idx < 0 || idx >= MESHTASTIC_MAX_CHANNELS) {
+        println("Invalid channel number (1-8)");
+        return;
+    }
+    if (idx == 0) {
+        println("Cannot remove channel 1 (LongFast)");
+        return;
+    }
+    esp_err_t err = meshtastic_channel_remove((uint8_t)idx);
+    if (err == ESP_OK) {
+        printf_line("Removed channel %d", idx + 1);
+    } else {
+        printf_line("Channel %d not found", idx + 1);
+    }
+}
+
+void MatsuMonsterTerminal::cmdChSet(const char *args)
+{
+    if (!args || !*args) {
+        println("Usage: ch_set <N>  (1-8)");
+        return;
+    }
+    int idx = atoi(args) - 1;
+    if (idx < 0 || idx >= MESHTASTIC_MAX_CHANNELS) {
+        println("Invalid channel number (1-8)");
+        return;
+    }
+    const meshtastic_channel_t *ch = meshtastic_channel_get((uint8_t)idx);
+    if (!ch) {
+        printf_line("Channel %d is empty", idx + 1);
+        return;
+    }
+    meshtastic_channel_set_tx((uint8_t)idx);
+    printf_line("Active TX channel: %d (%s)", idx + 1, ch->name);
+}
+
 void MatsuMonsterTerminal::cmdQuit()
 {
     println("Returning to emulator...");
@@ -1493,11 +1637,26 @@ void MatsuMonsterTerminal::drawInputLine()
 
     int input_x = MARGIN_X + gw * 2;  // "> " = 2 glyph widths
     fast_text_blit(fb_, MARGIN_X, y, "> ", COLOR_PROMPT, panel_x);
-    fast_text_blit(fb_, input_x, y, input_buf_, COLOR_INPUT, panel_x);
+
+    // Scroll the visible window so the cursor stays within the left panel
+    int avail_px = panel_x - input_x - gw;
+    int vis_chars = (gw > 0) ? (avail_px / gw) : 0;
+    if (vis_chars < 1) vis_chars = 1;
+
+    const char *vis = input_buf_;
+    int vis_len = input_len_;
+    if (vis_len > vis_chars) {
+        int skip = vis_len - vis_chars;
+        vis     += skip;
+        vis_len  = vis_chars;
+    }
+
+    fast_text_blit(fb_, input_x, y, vis, COLOR_INPUT, panel_x);
 
     if (cursor_on_) {
-        int cx = input_x + input_len_ * gw;
-        fast_rect(fb_, cx, y + 2, 6, FONT_PX, COLOR_CURSOR);
+        int cx = input_x + vis_len * gw;
+        if (cx < panel_x)
+            fast_rect(fb_, cx, y + 2, 6, FONT_PX, COLOR_CURSOR);
     }
 }
 

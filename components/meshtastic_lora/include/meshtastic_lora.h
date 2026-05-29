@@ -90,6 +90,13 @@ esp_err_t meshtastic_lora_send_raw(const uint8_t *data, size_t len);
 bool meshtastic_lora_pop_raw(uint8_t *out_buf, size_t max_len,
                              size_t *out_len);
 
+// Inject a raw packet into the RX queue as if it arrived over LoRa.
+// Used by the MQTT transport to feed packets into the existing drain
+// task for dedup + dispatch. The data must be in the standard on-air
+// format (16-byte header + encrypted payload). Non-blocking; drops
+// the oldest entry if the queue is full. Returns true on success.
+bool meshtastic_lora_push_raw(const uint8_t *data, size_t len);
+
 // Cumulative counters since begin() — handy for the terminal's `lora_stats`
 // command to verify the radio is actually doing anything.
 typedef struct {

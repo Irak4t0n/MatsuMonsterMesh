@@ -9,6 +9,56 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 29 2026 — MQTT transport + configurable channel system (Session 11)
+
+### Goal
+Add MQTT transport for mesh bridging and a configurable multi-channel system
+matching real Meshtastic firmware, so the user can switch between LongFast,
+MonsterMesh, and personal channels.
+
+### Changes
+
+**MQTT Transport** (new `components/mqtt_transport/`):
+- WiFi auto-connect using NVS-stored credentials from the launcher
+- TLS connection to EMQX broker, subscribes to `kanto/2/e/MonsterMesh/#`
+- TX hook publishes daycare beacons to MQTT on every LoRa send
+- RX path injects MQTT packets into the LoRa pipeline via `meshtastic_lora_push_raw()`
+- Auto-reconnect on WiFi drop, own-packet filtering
+- `mqtt_status` terminal command shows WiFi + MQTT connection state
+- Verbose logging for debugging (init steps, RX data events)
+
+**Channel Registry** (`meshtastic_proto.{h,c}`):
+- Up to 8 configurable channels (slot 0 = LongFast permanent, slot 1 = MonsterMesh)
+- `meshtastic_channel_hash()` computes 8-bit hash from name + PSK (XOR algorithm)
+- `meshtastic_channel_add/remove/get/set_tx` API
+- `send_data_frame_ch()` encrypts with any channel's PSK and uses its hash
+- RX drain_task iterates all registered channels instead of hardcoded 3-key fallback
+- `meshtastic_chat_entry_t.channel_idx` tracks which channel each message came from
+
+**Chat UI Side Panel** (`MeshtasticChatView.cpp`):
+- 180px right panel showing channel list with active indicator, channel info
+  (hash, PSK type), node count, MQTT status, and hotkey help
+- Fn+1..8 switches active TX channel
+- Title bar shows current channel name
+- Chat log tags messages not on the active channel with `[N]`
+
+**Terminal Channel Commands** (`MatsuMonsterTerminal.cpp`):
+- `ch_list` — list all configured channels
+- `ch_add <name> <hex-psk>` — add a channel with 16-byte hex PSK
+- `ch_del <index>` — remove a channel by 1-based index
+- `ch_set <index>` — set active TX channel
+
+**Input Overflow Fix** (both terminal + chat):
+- Compose/input text scrolls horizontally when it overflows the left panel
+- Cursor stays visible within the panel boundary
+
+### Result
+MQTT fully working on hardware — WiFi connects, TLS validates, broker subscribes,
+TX echo received. Channel system tested: messages sent on MonsterMesh channel from
+the terminal, received and decoded correctly. Input overflow fixed in both views.
+
+---
+
 ## Session May 28 2026 — Full pax-free terminal rendering (Session 10 cont.)
 
 ### Goal

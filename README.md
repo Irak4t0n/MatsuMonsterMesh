@@ -88,11 +88,20 @@ in the badge-bsp managed component for the full pin map.
 - **LoRa radio**: live on US 907.125 MHz LongFast via the C6
   coprocessor's tanmatsu-radio firmware — RX and TX working,
   full-size daycare beacons (all 6 pokemon) transmitted
+- **Multi-channel system**: up to 8 configurable Meshtastic channels
+  (LongFast + MonsterMesh pre-populated). Channel-aware TX/RX with
+  per-channel AES encryption. Terminal commands (`ch_list`, `ch_add`,
+  `ch_del`, `ch_set`) and Fn+1..8 hotkeys in the chat UI for switching
 - **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB,
-  multi-key channel decryption (LongFast + MonsterMesh + plaintext
-  fallback), TEXT_MESSAGE_APP + PRIVATE_APP portnum routing
-- **Chat UI** (Alt+M): full Meshtastic chat view with compose bar
-  (up to 200 chars), message history, and in-emulator notification overlay
+  channel registry decryption (iterates all registered keys),
+  TEXT_MESSAGE_APP + PRIVATE_APP portnum routing
+- **Chat UI** (Fn+M): full Meshtastic chat view with compose bar
+  (up to 200 chars), message history, side panel showing channel list /
+  MQTT status / node count, and in-emulator notification overlay
+- **MQTT transport**: WiFi auto-connect, TLS to EMQX broker,
+  TX hook publishes daycare beacons, RX injection into LoRa pipeline,
+  auto-reconnect on WiFi drop. `mqtt_status` terminal command for
+  on-device diagnostics
 - **Daycare ↔ mesh**: beacon TX/RX, broadcast text, DM callbacks
   all wired through the real radio — cross-device compatible with
   upstream MonsterMesh on T-Deck
@@ -192,8 +201,9 @@ Things that work today:
 - GBC emulation at ~60 FPS, all emulator features (save states, rewind,
   fast forward, ROM selector)
 - Fn+T terminal with `party`, `status`, `fight`, `daycare_beacon`,
-  `mesh_recent`, `lora_stats`, and more
-- Alt+M Meshtastic chat UI with compose bar and message history
+  `mesh_recent`, `lora_stats`, `ch_list`, `mqtt_status`, and more
+- Fn+M Meshtastic chat UI with compose bar, message history, and
+  channel/MQTT side panel
 - In-emulator notification overlay for incoming mesh messages
 - LoRa RX: receives Meshtastic packets (NodeInfo, text, PRIVATE_APP)
   with multi-key decryption (LongFast, MonsterMesh, plaintext)

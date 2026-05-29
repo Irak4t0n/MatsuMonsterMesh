@@ -119,6 +119,11 @@ private:
     void cmdMeshNodes();
     void cmdDaycareBeacon();
     void cmdLoraTxTest(const char *args);
+    void cmdMqttStatus();
+    void cmdChList();
+    void cmdChAdd(const char *args);
+    void cmdChDel(const char *args);
+    void cmdChSet(const char *args);
     void cmdQuit();
 
     // ── Internal helpers ────────────────────────────────────────────────────

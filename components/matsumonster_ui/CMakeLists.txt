@@ -13,6 +13,7 @@ idf_component_register(
         meshtastic_radio
         meshtastic_lora                 # for cmdLoraSend / cmdLoraStats
         meshtastic_proto                # for cmdMeshRecent (Session 2a)
+        mqtt_transport                  # for cmdMqttStatus
         emulator_sram_iface
         badge-bsp                  # bsp/display.h, bsp/input.h
         robotman2412__pax-gfx      # pax_gfx.h, pax_text.h, pax_fonts.h

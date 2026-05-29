@@ -83,4 +83,5 @@ private:
     void drawChatLog();
     void drawComposeBox();
     void drawHelpLine();
+    void drawSidePanel();
 };

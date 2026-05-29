@@ -60,6 +60,106 @@ static const uint8_t MESHTASTIC_MM_KEY[16] = {
 };
 #define MESHTASTIC_MM_CHANNEL_HASH 0x25
 
+// ── Channel registry ───────────────────────────────────────────────────
+
+static meshtastic_channel_t s_channels[MESHTASTIC_MAX_CHANNELS];
+static uint8_t              s_tx_channel = 0;  // active TX channel index
+
+uint8_t meshtastic_channel_hash(const char *name,
+                                 const uint8_t *psk, uint8_t psk_len)
+{
+    uint8_t h = 0;
+    if (name) {
+        for (const char *p = name; *p; p++) h ^= (uint8_t)*p;
+    }
+    for (uint8_t i = 0; i < psk_len; i++) {
+        h ^= psk[i];
+    }
+    return h;
+}
+
+static void channel_registry_init(void)
+{
+    memset(s_channels, 0, sizeof(s_channels));
+
+    // Slot 0: LongFast (always present)
+    meshtastic_channel_t *lf = &s_channels[0];
+    // Meshtastic uses empty string for default channel hash,
+    // but displays as "LongFast"
+    strncpy(lf->name, "LongFast", sizeof(lf->name) - 1);
+    memcpy(lf->psk, MESHTASTIC_LONGFAST_KEY, 16);
+    lf->psk_len = 16;
+    lf->hash    = MESHTASTIC_LONGFAST_CHANNEL_HASH;
+    lf->in_use  = true;
+
+    // Slot 1: MonsterMesh
+    meshtastic_channel_t *mm = &s_channels[1];
+    strncpy(mm->name, "MonsterMesh", sizeof(mm->name) - 1);
+    memcpy(mm->psk, MESHTASTIC_MM_KEY, 16);
+    mm->psk_len = 16;
+    mm->hash    = MESHTASTIC_MM_CHANNEL_HASH;
+    mm->in_use  = true;
+}
+
+int meshtastic_channel_add(const char *name,
+                            const uint8_t *psk, uint8_t psk_len)
+{
+    if (!name || psk_len > 32) return -1;
+    // Find first empty slot (skip 0 — reserved for LongFast)
+    for (int i = 1; i < MESHTASTIC_MAX_CHANNELS; i++) {
+        if (!s_channels[i].in_use) {
+            meshtastic_channel_t *ch = &s_channels[i];
+            memset(ch, 0, sizeof(*ch));
+            strncpy(ch->name, name, sizeof(ch->name) - 1);
+            if (psk && psk_len > 0) {
+                memcpy(ch->psk, psk, psk_len);
+            }
+            ch->psk_len = psk_len;
+            // Meshtastic hash uses empty string for default channel name
+            // but for custom channels it uses the actual name
+            ch->hash   = meshtastic_channel_hash(name, ch->psk, psk_len);
+            ch->in_use = true;
+            return i;
+        }
+    }
+    return -1;  // full
+}
+
+esp_err_t meshtastic_channel_remove(uint8_t index)
+{
+    if (index == 0 || index >= MESHTASTIC_MAX_CHANNELS) return ESP_ERR_INVALID_ARG;
+    if (!s_channels[index].in_use) return ESP_ERR_NOT_FOUND;
+    memset(&s_channels[index], 0, sizeof(s_channels[0]));
+    // If we removed the active TX channel, fall back to 0
+    if (s_tx_channel == index) s_tx_channel = 0;
+    return ESP_OK;
+}
+
+const meshtastic_channel_t *meshtastic_channel_get(uint8_t index)
+{
+    if (index >= MESHTASTIC_MAX_CHANNELS) return NULL;
+    if (!s_channels[index].in_use) return NULL;
+    return &s_channels[index];
+}
+
+uint8_t meshtastic_channel_count(void)
+{
+    uint8_t n = 0;
+    for (int i = 0; i < MESHTASTIC_MAX_CHANNELS; i++) {
+        if (s_channels[i].in_use) n++;
+    }
+    return n;
+}
+
+void meshtastic_channel_set_tx(uint8_t index)
+{
+    if (index < MESHTASTIC_MAX_CHANNELS && s_channels[index].in_use) {
+        s_tx_channel = index;
+    }
+}
+
+uint8_t meshtastic_channel_get_tx(void) { return s_tx_channel; }
+
 // Build the 16-byte CTR nonce per CryptoEngine::initNonce in upstream.
 // nonce[0..7]  = packet_id as 64-bit LE (upper 32 bits zero on the wire)
 // nonce[8..11] = from_node as 32-bit LE
@@ -303,16 +403,13 @@ static bool relay_dedup_check(uint32_t pkt_id)
 // recently (relay copy of the same packet). Truncates oversized text.
 // Safe to call from any task.
 static void chat_push(uint32_t from, uint32_t pkt_id, bool is_self,
-                      const uint8_t *text, size_t len)
+                      const uint8_t *text, size_t len, int8_t ch_idx)
 {
     if (!s_chat_mtx) chat_init();
     if (!s_chat_mtx) return;
     xSemaphoreTake(s_chat_mtx, portMAX_DELAY);
 
     if (chat_dedup_check_locked(pkt_id)) {
-        // Same packet_id we already recorded — quietly drop the
-        // duplicate. The mesh_recent ring still saw it, so debug
-        // tooling can still inspect relay behaviour.
         xSemaphoreGive(s_chat_mtx);
         return;
     }
@@ -323,9 +420,10 @@ static void chat_push(uint32_t from, uint32_t pkt_id, bool is_self,
     s_chat_total++;
 
     memset(e, 0, sizeof(*e));
-    e->when_ms   = now_ms();
-    e->from_node = from;
-    e->is_self   = is_self;
+    e->when_ms     = now_ms();
+    e->from_node   = from;
+    e->is_self     = is_self;
+    e->channel_idx = ch_idx;
     size_t copy = len < (MESHTASTIC_CHAT_TEXT_MAX - 1)
                       ? len : (MESHTASTIC_CHAT_TEXT_MAX - 1);
     // Filter out control chars so a malformed packet can't paint
@@ -392,6 +490,14 @@ static meshtastic_private_cb_t s_private_cb = NULL;
 void meshtastic_proto_set_private_cb(meshtastic_private_cb_t cb)
 {
     s_private_cb = cb;
+}
+
+// Session 11: MQTT TX hook — called from send_data_frame_mm after encrypt.
+static meshtastic_mqtt_tx_cb_t s_mqtt_tx_cb = NULL;
+
+void meshtastic_proto_set_mqtt_tx_cb(meshtastic_mqtt_tx_cb_t cb)
+{
+    s_mqtt_tx_cb = cb;
 }
 
 // ── NodeDB (Session 3b) ───────────────────────────────────────────────
@@ -613,6 +719,63 @@ static esp_err_t send_data_frame(uint32_t to, uint32_t pkt_id,
     return meshtastic_lora_send_raw(pkt, total);
 }
 
+// Generic channel-aware send: encrypts with the given channel's key/hash.
+static esp_err_t send_data_frame_ch(uint8_t ch_idx, uint32_t to, uint32_t pkt_id,
+                                     uint8_t *data_pb, size_t data_len)
+{
+    if (ch_idx >= MESHTASTIC_MAX_CHANNELS || !s_channels[ch_idx].in_use) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (data_len == 0 || data_len + MESHTASTIC_HEADER_LEN > ML_RAW_MAX_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const meshtastic_channel_t *ch = &s_channels[ch_idx];
+    uint32_t from = meshtastic_proto_node_id();
+
+    uint8_t encrypted[ML_RAW_MAX_LEN];
+    if (ch->psk_len > 0) {
+        esp_err_t err = aes128_ctr_crypt(ch->psk, from, pkt_id,
+                                          data_pb, data_len, encrypted);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "encrypt ch[%d] failed: %s", ch_idx, esp_err_to_name(err));
+            return err;
+        }
+    } else {
+        // No encryption (PSK=0)
+        memcpy(encrypted, data_pb, data_len);
+    }
+
+    uint8_t pkt[ML_RAW_MAX_LEN];
+    pkt[0]  = (uint8_t)(to      );
+    pkt[1]  = (uint8_t)(to  >>  8);
+    pkt[2]  = (uint8_t)(to  >> 16);
+    pkt[3]  = (uint8_t)(to  >> 24);
+    pkt[4]  = (uint8_t)(from     );
+    pkt[5]  = (uint8_t)(from >>  8);
+    pkt[6]  = (uint8_t)(from >> 16);
+    pkt[7]  = (uint8_t)(from >> 24);
+    pkt[8]  = (uint8_t)(pkt_id      );
+    pkt[9]  = (uint8_t)(pkt_id >>  8);
+    pkt[10] = (uint8_t)(pkt_id >> 16);
+    pkt[11] = (uint8_t)(pkt_id >> 24);
+    pkt[12] = 0x63;  // flags: hop 3/3
+    pkt[13] = ch->hash;
+    pkt[14] = 0;
+    pkt[15] = 0;
+    memcpy(pkt + MESHTASTIC_HEADER_LEN, encrypted, data_len);
+
+    size_t total = MESHTASTIC_HEADER_LEN + data_len;
+    ESP_LOGI(TAG, "tx(ch%d/%s) to=!%08lx from=!%08lx id=%08lx ch=0x%02x total=%u",
+             ch_idx, ch->name, (unsigned long)to, (unsigned long)from,
+             (unsigned long)pkt_id, ch->hash, (unsigned)total);
+
+    if (s_mqtt_tx_cb) {
+        s_mqtt_tx_cb(to, from, pkt_id, ch->hash, encrypted, data_len);
+    }
+
+    return meshtastic_lora_send_raw(pkt, total);
+}
+
 // MonsterMesh channel: encrypted with MonsterMesh!2024 PSK, ch=0x25.
 static esp_err_t send_data_frame_mm(uint32_t to, uint32_t pkt_id,
                                      uint8_t *data_pb, size_t data_len)
@@ -654,6 +817,13 @@ static esp_err_t send_data_frame_mm(uint32_t to, uint32_t pkt_id,
     ESP_LOGI(TAG, "tx(mm) to=!%08lx from=!%08lx id=%08lx ch=0x%02x total=%u",
              (unsigned long)to, (unsigned long)from, (unsigned long)pkt_id,
              MESHTASTIC_MM_CHANNEL_HASH, (unsigned)total);
+
+    // Session 11: also publish via MQTT if the hook is registered.
+    if (s_mqtt_tx_cb) {
+        s_mqtt_tx_cb(to, from, pkt_id, MESHTASTIC_MM_CHANNEL_HASH,
+                     encrypted, data_len);
+    }
+
     return meshtastic_lora_send_raw(pkt, total);
 }
 
@@ -676,7 +846,7 @@ esp_err_t meshtastic_send_text(const char *text)
     // packet_id we pass also seeds the dedup ring so the relay copy of
     // our own message gets suppressed when the drain task receives it.
     chat_push(meshtastic_proto_node_id(), pkt_id, true,
-              (const uint8_t *)text, text_len);
+              (const uint8_t *)text, text_len, (int8_t)s_tx_channel);
 
     // Build the Data protobuf:
     //   field 1 (portnum, varint) = TEXT_MESSAGE_APP
@@ -690,7 +860,7 @@ esp_err_t meshtastic_send_text(const char *text)
     memcpy(data_pb + pos, text, text_len);
     pos += text_len;
 
-    return send_data_frame(MESHTASTIC_BROADCAST_ADDR, pkt_id, data_pb, pos);
+    return send_data_frame_ch(s_tx_channel, MESHTASTIC_BROADCAST_ADDR, pkt_id, data_pb, pos);
 }
 
 esp_err_t meshtastic_send_private(uint32_t dest,
@@ -917,37 +1087,40 @@ static void drain_task(void *arg)
             entry.portnum_guess    = -1;
             entry.plain_sample_len = 0;
             entry.body[0]          = '\0';
+            int8_t matched_ch      = -1;
             if (payload_len > 0) {
                 uint8_t plain[ML_RAW_MAX_LEN];
                 const uint8_t *decoded = NULL;
 
-                // Try 1: LongFast AES-128-CTR decrypt.
-                esp_err_t derr = meshtastic_decrypt_longfast(
-                    entry.header.from, entry.header.id,
-                    raw + payload_off, payload_len, plain);
-                if (derr == ESP_OK) {
-                    int16_t guess = (int16_t)meshtastic_guess_portnum(plain, payload_len);
-                    if (guess >= 0) {
-                        decoded = plain;
-                        entry.portnum_guess = guess;
-                    }
-                }
-
-                // Try 2: MonsterMesh channel key.
-                if (!decoded) {
-                    derr = aes128_ctr_crypt(MESHTASTIC_MM_KEY,
-                               entry.header.from, entry.header.id,
-                               raw + payload_off, payload_len, plain);
-                    if (derr == ESP_OK) {
-                        int16_t guess = (int16_t)meshtastic_guess_portnum(plain, payload_len);
+                // Try each registered channel's key.
+                for (int ci = 0; ci < MESHTASTIC_MAX_CHANNELS && !decoded; ci++) {
+                    if (!s_channels[ci].in_use) continue;
+                    if (s_channels[ci].psk_len > 0) {
+                        esp_err_t derr = aes128_ctr_crypt(
+                            s_channels[ci].psk,
+                            entry.header.from, entry.header.id,
+                            raw + payload_off, payload_len, plain);
+                        if (derr == ESP_OK) {
+                            int16_t guess = (int16_t)meshtastic_guess_portnum(plain, payload_len);
+                            if (guess >= 0) {
+                                decoded = plain;
+                                entry.portnum_guess = guess;
+                                matched_ch = (int8_t)ci;
+                            }
+                        }
+                    } else {
+                        // PSK=0: try plaintext
+                        int16_t guess = (int16_t)meshtastic_guess_portnum(
+                                            raw + payload_off, payload_len);
                         if (guess >= 0) {
-                            decoded = plain;
+                            decoded = raw + payload_off;
                             entry.portnum_guess = guess;
+                            matched_ch = (int8_t)ci;
                         }
                     }
                 }
 
-                // Try 3: plaintext (PSK=0 channel).
+                // Last resort: try plaintext even if no PSK=0 channel registered
                 if (!decoded) {
                     int16_t guess = (int16_t)meshtastic_guess_portnum(
                                         raw + payload_off, payload_len);
@@ -991,7 +1164,8 @@ static void drain_task(void *arg)
                             // suppress relay copies (same packet ID,
                             // different relay_node).
                             chat_push(entry.header.from, entry.header.id,
-                                      false, d.payload, d.payload_len);
+                                      false, d.payload, d.payload_len,
+                                      matched_ch);
                         } else if (d.portnum == MESHTASTIC_PORTNUM_NODEINFO_APP) {
                             char longn[MESHTASTIC_NODE_NAME_LONG]  = {0};
                             char shortn[MESHTASTIC_NODE_NAME_SHORT] = {0};
@@ -1158,6 +1332,7 @@ esp_err_t meshtastic_proto_begin(void)
     s_ring_count   = 0;
     s_total_parsed = 0;
 
+    channel_registry_init();
     nodedb_init();
     chat_init();
 

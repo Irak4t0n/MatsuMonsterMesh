@@ -47,6 +47,46 @@ extern "C" {
 // Plus uses this one out of the box.
 #define MESHTASTIC_LONGFAST_CHANNEL_HASH 0x08
 
+// ── Channel registry ───────────────────────────────────────────────────
+//
+// Up to 8 configurable channels, matching Meshtastic firmware. Each
+// channel has a name, PSK, and auto-computed 8-bit hash. Channel 0 is
+// always LongFast (cannot be removed). The "active TX channel" selects
+// which channel meshtastic_send_text() encrypts for.
+
+#define MESHTASTIC_MAX_CHANNELS 8
+#define MESHTASTIC_CHANNEL_NAME_MAX 24
+
+typedef struct {
+    char     name[MESHTASTIC_CHANNEL_NAME_MAX];
+    uint8_t  psk[32];       // pre-shared key (16 or 32 bytes)
+    uint8_t  psk_len;       // 0 = no encryption, 16 = AES-128, 32 = AES-256
+    uint8_t  hash;          // computed from XOR(name) ^ XOR(psk)
+    bool     in_use;        // slot occupied
+} meshtastic_channel_t;
+
+// Compute the Meshtastic channel hash from name + PSK.
+uint8_t meshtastic_channel_hash(const char *name,
+                                 const uint8_t *psk, uint8_t psk_len);
+
+// Add a channel. Returns slot index (0-7) or -1 if full.
+// Channel 0 (LongFast) is pre-populated; first add goes to slot 1.
+int meshtastic_channel_add(const char *name,
+                            const uint8_t *psk, uint8_t psk_len);
+
+// Remove a channel by index. Cannot remove index 0.
+esp_err_t meshtastic_channel_remove(uint8_t index);
+
+// Get channel info. Returns NULL if slot empty or out of range.
+const meshtastic_channel_t *meshtastic_channel_get(uint8_t index);
+
+// Number of active (in_use) channels.
+uint8_t meshtastic_channel_count(void);
+
+// Set / get the active TX channel index.
+void meshtastic_channel_set_tx(uint8_t index);
+uint8_t meshtastic_channel_get_tx(void);
+
 // Common Data.portnum values (subset of upstream meshtastic.PortNum proto
 // enum — see firmware/protobufs/portnums.proto). Surfaced so the terminal
 // can label decrypted packets without dragging in the full nanopb stack
@@ -177,13 +217,10 @@ bool meshtastic_decode_user(const uint8_t *buf, size_t len,
 // as big-endian uint32_t). Stable across reboots; unique per device.
 uint32_t meshtastic_proto_node_id(void);
 
-// Send a broadcast text message on the default LongFast channel. The
-// text must be NUL-terminated UTF-8; bytes after the first 200 are
-// dropped to stay under SX1262's max payload. Returns ESP_OK if the
-// packet was queued on the radio, or the underlying error otherwise.
-// The receiving Meshtastic device will display this as a regular text
-// message from our node — though without a prior NodeInfo announce the
-// sender will appear as "Unknown" rather than by name.
+// Send a broadcast text message on the active TX channel. The text must
+// be NUL-terminated UTF-8; bytes after the first 200 are dropped to
+// stay under SX1262's max payload. Returns ESP_OK if the packet was
+// queued on the radio, or the underlying error otherwise.
 esp_err_t meshtastic_send_text(const char *text);
 
 // Send a PRIVATE_APP (portnum 256) payload on the default LongFast
@@ -266,6 +303,7 @@ typedef struct {
     uint32_t when_ms;
     uint32_t from_node;          // sender's NodeNum (us, if is_self)
     bool     is_self;            // true = we sent this
+    int8_t   channel_idx;        // channel index (0-7), or -1 if unknown
     uint8_t  text_len;
     char     text[MESHTASTIC_CHAT_TEXT_MAX];
 } meshtastic_chat_entry_t;
@@ -302,6 +340,18 @@ void meshtastic_proto_set_chat_notify_cb(meshtastic_chat_notify_cb_t cb);
 typedef void (*meshtastic_private_cb_t)(uint32_t from_node,
                                         const uint8_t *payload, size_t len);
 void meshtastic_proto_set_private_cb(meshtastic_private_cb_t cb);
+
+// ── MQTT TX hook (Session 11) ────────────────────────────────────────
+//
+// Optional callback invoked by send_data_frame_mm() after encrypting the
+// payload. The MQTT transport registers this to publish a ServiceEnvelope
+// to the broker in parallel with the LoRa TX. The encrypted bytes and
+// header fields are passed so the callback can build the protobuf without
+// re-encrypting.
+typedef void (*meshtastic_mqtt_tx_cb_t)(uint32_t to, uint32_t from,
+                                         uint32_t pkt_id, uint8_t channel_hash,
+                                         const uint8_t *encrypted, size_t enc_len);
+void meshtastic_proto_set_mqtt_tx_cb(meshtastic_mqtt_tx_cb_t cb);
 
 // ── Ring buffer of recently-seen parsed packets ────────────────────────
 //

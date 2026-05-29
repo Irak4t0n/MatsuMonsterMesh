@@ -6,23 +6,26 @@ This project "MatsuMonsterMesh" combines two things:
 
 Players use LoRa radio to exchange daycare beacons and battle over the mesh — no internet required. The emulator's live SRAM is the source of truth for party data.
 
-## Current State (Session 10)
+## Current State (Session 11)
 
 - GBC emulation at ~60 FPS with save states, rewind, fast forward
 - Bidirectional daycare interop with upstream MonsterMesh on T-Deck verified on hardware
 - LoRa TX/RX on MonsterMesh channel (AES-128-CTR, PSK="MonsterMesh!2024", ch=0x25)
-- Multi-key RX decryption: LongFast → MonsterMesh → plaintext fallback
+- Configurable multi-channel system: up to 8 Meshtastic channels (LongFast + MonsterMesh pre-populated)
+- Channel-aware RX decryption: iterates all registered channel keys (replaces hardcoded fallback)
+- Channel-aware TX: encrypts with active channel's PSK and hash
+- Terminal commands: ch_list, ch_add, ch_del, ch_set for channel management
+- Chat UI side panel showing channel list, active channel info, node count, MQTT status
+- Fn+1..8 hotkeys in chat UI to switch active TX channel
+- MQTT transport: WiFi auto-connect, TLS to EMQX broker, TX hook publishes beacons, RX logging
+- mqtt_status terminal command for on-device MQTT/WiFi diagnostics
 - Full 122-byte DaycareBeacon TX matching upstream struct (including ngPlusTier field)
-- Meshtastic chat UI (Alt+M) and terminal (Fn+T) both functional
+- Meshtastic chat UI (Fn+M) and terminal (Fn+T) both functional
 - Daycare auto-check-in from live emulator SRAM on ROM load
 - Gen 2 (Crystal/Gold/Silver) support: live WRAM party reading, daycare check-in, battle with move filtering
-- Terminal scrollback: direct-to-framebuffer glyph cache bypasses pax CW rotation (~640ms → <5ms per frame)
-- Bottom-anchored scrollback layout: text fills up to the input line with no gap
-- Chat compose buffer increased to 200 chars (matches Meshtastic send limit)
-- Chat UI uses shared FastText glyph cache for smooth scrolling (same 100x speedup as terminal)
+- Terminal + chat input lines scroll horizontally when text overflows the left panel
 - Terminal fully pax-free: header, input line, side panel, battle panel all use FastText
 - FastText `fast_hline()` / `fast_rect()` primitives for separators and cursors
-- All Unicode box-drawing chars replaced with ASCII for FastText compatibility
 
 ## Rules
 
