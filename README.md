@@ -89,9 +89,10 @@ in the badge-bsp managed component for the full pin map.
   coprocessor's tanmatsu-radio firmware — RX and TX working,
   full-size daycare beacons (all 6 pokemon) transmitted
 - **Multi-channel system**: up to 8 configurable Meshtastic channels
-  (LongFast + MonsterMesh pre-populated). Channel-aware TX/RX with
-  per-channel AES encryption. Terminal commands (`ch_list`, `ch_add`,
-  `ch_del`, `ch_set`) and Fn+1..8 hotkeys in the chat UI for switching
+  (LongFast + MonsterMesh pre-populated), persisted to NVS across reboots.
+  Channel-aware TX/RX with per-channel AES encryption. Terminal commands
+  (`ch_list`, `ch_add`, `ch_del`, `ch_set`) and Fn+1..8 hotkeys in the
+  chat UI for switching
 - **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB,
   channel registry decryption (iterates all registered keys),
   TEXT_MESSAGE_APP + PRIVATE_APP portnum routing

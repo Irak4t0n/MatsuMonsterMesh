@@ -11,7 +11,7 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - GBC emulation at ~60 FPS with save states, rewind, fast forward
 - Bidirectional daycare interop with upstream MonsterMesh on T-Deck verified on hardware
 - LoRa TX/RX on MonsterMesh channel (AES-128-CTR, PSK="MonsterMesh!2024", ch=0x25)
-- Configurable multi-channel system: up to 8 Meshtastic channels (LongFast + MonsterMesh pre-populated)
+- Configurable multi-channel system: up to 8 Meshtastic channels (LongFast + MonsterMesh pre-populated), persisted to NVS
 - Channel-aware RX decryption: iterates all registered channel keys (replaces hardcoded fallback)
 - Channel-aware TX: encrypts with active channel's PSK and hash
 - Terminal commands: ch_list, ch_add, ch_del, ch_set for channel management

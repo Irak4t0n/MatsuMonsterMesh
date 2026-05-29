@@ -9,6 +9,17 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 29 2026 — Channel NVS persistence (Session 11 cont.)
+
+### Changes
+- Channel registry (all 8 slots + active TX index) saved to NVS on every
+  `ch_add`, `ch_del`, and `ch_set`/Fn+N switch
+- On boot, loads from NVS; falls back to defaults (LongFast + MonsterMesh)
+  if no saved data exists
+- Verified on hardware: channels survive reboot
+
+---
+
 ## Session May 29 2026 — MQTT transport + configurable channel system (Session 11)
 
 ### Goal

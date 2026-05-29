@@ -8,6 +8,8 @@
 #include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -78,14 +80,51 @@ uint8_t meshtastic_channel_hash(const char *name,
     return h;
 }
 
-static void channel_registry_init(void)
+// NVS namespace for channel persistence
+#define CHAN_NVS_NS   "mesh_channels"
+#define CHAN_NVS_KEY  "chans"
+#define TXCH_NVS_KEY  "tx_ch"
+
+static void channel_registry_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(CHAN_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, CHAN_NVS_KEY, s_channels, sizeof(s_channels));
+    nvs_set_u8(h, TXCH_NVS_KEY, s_tx_channel);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "channel registry saved to NVS");
+}
+
+// Returns true if channels were loaded from NVS.
+static bool channel_registry_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(CHAN_NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+
+    size_t len = sizeof(s_channels);
+    esp_err_t err = nvs_get_blob(h, CHAN_NVS_KEY, s_channels, &len);
+    if (err == ESP_OK && len == sizeof(s_channels)) {
+        uint8_t tx = 0;
+        if (nvs_get_u8(h, TXCH_NVS_KEY, &tx) == ESP_OK &&
+            tx < MESHTASTIC_MAX_CHANNELS && s_channels[tx].in_use) {
+            s_tx_channel = tx;
+        }
+        nvs_close(h);
+        ESP_LOGI(TAG, "channel registry loaded from NVS (%d channels)",
+                 meshtastic_channel_count());
+        return true;
+    }
+    nvs_close(h);
+    return false;
+}
+
+static void channel_registry_defaults(void)
 {
     memset(s_channels, 0, sizeof(s_channels));
 
     // Slot 0: LongFast (always present)
     meshtastic_channel_t *lf = &s_channels[0];
-    // Meshtastic uses empty string for default channel hash,
-    // but displays as "LongFast"
     strncpy(lf->name, "LongFast", sizeof(lf->name) - 1);
     memcpy(lf->psk, MESHTASTIC_LONGFAST_KEY, 16);
     lf->psk_len = 16;
@@ -99,6 +138,17 @@ static void channel_registry_init(void)
     mm->psk_len = 16;
     mm->hash    = MESHTASTIC_MM_CHANNEL_HASH;
     mm->in_use  = true;
+}
+
+static void channel_registry_init(void)
+{
+    memset(s_channels, 0, sizeof(s_channels));
+    s_tx_channel = 0;
+
+    if (!channel_registry_load()) {
+        channel_registry_defaults();
+        ESP_LOGI(TAG, "channel registry: using defaults (LongFast + MonsterMesh)");
+    }
 }
 
 int meshtastic_channel_add(const char *name,
@@ -119,6 +169,7 @@ int meshtastic_channel_add(const char *name,
             // but for custom channels it uses the actual name
             ch->hash   = meshtastic_channel_hash(name, ch->psk, psk_len);
             ch->in_use = true;
+            channel_registry_save();
             return i;
         }
     }
@@ -132,6 +183,7 @@ esp_err_t meshtastic_channel_remove(uint8_t index)
     memset(&s_channels[index], 0, sizeof(s_channels[0]));
     // If we removed the active TX channel, fall back to 0
     if (s_tx_channel == index) s_tx_channel = 0;
+    channel_registry_save();
     return ESP_OK;
 }
 
@@ -155,6 +207,7 @@ void meshtastic_channel_set_tx(uint8_t index)
 {
     if (index < MESHTASTIC_MAX_CHANNELS && s_channels[index].in_use) {
         s_tx_channel = index;
+        channel_registry_save();
     }
 }
 
