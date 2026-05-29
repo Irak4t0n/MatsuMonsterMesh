@@ -90,8 +90,8 @@ in the badge-bsp managed component for the full pin map.
 - **Protocol stack**: 16-byte Meshtastic header parsing, NodeDB,
   multi-key channel decryption (LongFast + MonsterMesh + plaintext
   fallback), TEXT_MESSAGE_APP + PRIVATE_APP portnum routing
-- **Chat UI** (Alt+M): full Meshtastic chat view with compose bar,
-  message history, and in-emulator notification overlay
+- **Chat UI** (Alt+M): full Meshtastic chat view with compose bar
+  (up to 200 chars), message history, and in-emulator notification overlay
 - **Daycare ↔ mesh**: beacon TX/RX, broadcast text, DM callbacks
   all wired through the real radio — cross-device compatible with
   upstream MonsterMesh on T-Deck

@@ -18,6 +18,7 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - Gen 2 (Crystal/Gold/Silver) support: live WRAM party reading, daycare check-in, battle with move filtering
 - Terminal scrollback: direct-to-framebuffer glyph cache bypasses pax CW rotation (~640ms → <5ms per frame)
 - Bottom-anchored scrollback layout: text fills up to the input line with no gap
+- Chat compose buffer increased to 200 chars (matches Meshtastic send limit)
 
 ## Rules
 

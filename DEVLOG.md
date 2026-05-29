@@ -36,6 +36,10 @@ cost **~640ms per frame** (measured via ESP_LOGI instrumentation).
 
 **Result:** Full scrollback render dropped from ~640ms to <5ms (~100x speedup).
 
+### Chat compose buffer
+- `COMPOSE_MAX` bumped from 120 to 200 chars — was artificially limiting
+  message length below the Meshtastic protocol's 200-byte send cap.
+
 ---
 
 ## Session May 28 2026 — Gen 2 support + terminal performance (Session 9)

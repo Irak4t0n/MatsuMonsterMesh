@@ -58,7 +58,7 @@ private:
     QueueHandle_t  input_q_  = nullptr;
 
     // ── Compose buffer ──────────────────────────────────────────────
-    static constexpr size_t COMPOSE_MAX = 120;
+    static constexpr size_t COMPOSE_MAX = 200;
     char     compose_[COMPOSE_MAX] = {};
     size_t   compose_len_          = 0;
 
