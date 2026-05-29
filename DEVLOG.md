@@ -40,6 +40,13 @@ cost **~640ms per frame** (measured via ESP_LOGI instrumentation).
 - `COMPOSE_MAX` bumped from 120 to 200 chars — was artificially limiting
   message length below the Meshtastic protocol's 200-byte send cap.
 
+### Chat UI scrolling performance
+- Extracted glyph cache into shared `FastText.{h,cpp}` — singleton init,
+  used by both `MatsuMonsterTerminal` and `MeshtasticChatView`.
+- Replaced all `pax_draw_text` calls in the chat view with `fast_text_blit`.
+- Replaced `pax_background` with direct `memset` clear.
+- Chat rendering now matches the terminal's <5ms per frame.
+
 ---
 
 ## Session May 28 2026 — Gen 2 support + terminal performance (Session 9)

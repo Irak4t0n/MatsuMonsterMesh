@@ -4,6 +4,7 @@
 
 idf_component_register(
     SRCS
+        "FastText.cpp"
         "MatsuMonsterTerminal.cpp"
         "MeshtasticChatView.cpp"
     INCLUDE_DIRS "."

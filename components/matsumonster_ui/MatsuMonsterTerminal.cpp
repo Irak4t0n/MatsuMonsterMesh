@@ -40,6 +40,7 @@ static inline bool mm_restart_to_meshtastic(void) {
 #include "pax_fonts.h"
 #include "pax_text.h"
 
+#include "FastText.h"
 #include "PokemonDaycare.h"
 #include "MonsterMeshTextBattle.h"
 #include "MeshtasticRadio.h"
@@ -207,96 +208,12 @@ MatsuMonsterTerminal::MatsuMonsterTerminal(PokemonDaycare        *daycare,
     }
 }
 
-// Convert ARGB8888 to RGB565.
-static inline uint16_t argb_to_565(uint32_t argb) {
-    uint8_t r = (argb >> 16) & 0xFF;
-    uint8_t g = (argb >>  8) & 0xFF;
-    uint8_t b =  argb        & 0xFF;
-    return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-}
-
 void MatsuMonsterTerminal::setRenderTarget(pax_buf_t *fb, int canvas_w, int canvas_h)
 {
     fb_       = fb;
     canvas_w_ = canvas_w;
     canvas_h_ = canvas_h;
-    initGlyphCache();
-}
-
-// Pre-render every printable ASCII glyph (32–127) into a 1-byte-per-pixel
-// mask so drawScrollbackFast() can blit text directly into the raw
-// framebuffer, bypassing pax's per-pixel CW-rotation transform.  That
-// transform is the sole reason drawScrollback() took 600+ ms per frame.
-void MatsuMonsterTerminal::initGlyphCache()
-{
-    if (!fb_) return;
-
-    pax_vec2f sz = pax_text_size(pax_font_sky_mono, FONT_PX, "X");
-    glyph_w_ = (int)(sz.x + 0.5f);
-    glyph_h_ = (int)(sz.y + 0.5f);
-    if (glyph_w_ <= 0 || glyph_h_ <= 0) return;
-
-    // Physical (portrait) buffer width — the short axis of the display.
-    phys_w_ = 480;
-
-    int glyph_pixels = glyph_w_ * glyph_h_;
-    glyph_mask_ = (uint8_t *)calloc(96 * glyph_pixels, 1);
-    if (!glyph_mask_) {
-        ESP_LOGE("term", "glyph cache alloc failed");
-        return;
-    }
-
-    // Tiny unrotated temp buffer — same pixel format as fb_, no orientation.
-    pax_buf_t tmp;
-    pax_buf_init(&tmp, NULL, glyph_w_, glyph_h_, pax_buf_get_type(fb_));
-
-    char str[2] = {0, 0};
-    for (int ch = 32; ch < 128; ch++) {
-        pax_background(&tmp, 0xFF000000);   // black
-        str[0] = (char)ch;
-        pax_draw_text(&tmp, 0xFFFFFFFF, pax_font_sky_mono, FONT_PX, 0, 0, str);
-
-        // Extract binary mask: any non-zero pixel → 1.
-        uint16_t *pixels = (uint16_t *)pax_buf_get_pixels(&tmp);
-        uint8_t  *mask   = &glyph_mask_[(ch - 32) * glyph_pixels];
-        for (int i = 0; i < glyph_pixels; i++)
-            mask[i] = (pixels[i] != 0) ? 1 : 0;
-    }
-
-    pax_buf_destroy(&tmp);
-    ESP_LOGI("term", "glyph cache ready: %dx%d per glyph, %d bytes",
-             glyph_w_, glyph_h_, 96 * glyph_pixels);
-}
-
-// Blit a NUL-terminated string at logical coordinates (lx, ly) directly
-// into the raw framebuffer using the known CW rotation mapping:
-//   logical(lx, ly) → physical(479-ly, lx) → offset = lx * 480 + (479 - ly)
-void MatsuMonsterTerminal::blitTextFast(int lx, int ly, const char *text,
-                                         uint32_t color_argb, int max_x)
-{
-    if (!glyph_mask_ || !fb_) return;
-    uint16_t *raw   = (uint16_t *)pax_buf_get_pixels(fb_);
-    uint16_t  color = argb_to_565(color_argb);
-    int glyph_pixels = glyph_w_ * glyph_h_;
-
-    int x = lx;
-    for (int ci = 0; text[ci] && x + glyph_w_ <= max_x; ci++) {
-        char ch = text[ci];
-        if (ch < 32 || ch > 127) ch = '?';
-
-        const uint8_t *mask = &glyph_mask_[(ch - 32) * glyph_pixels];
-
-        // Column-major iteration: each column maps to contiguous physical
-        // memory (adjacent gy → offset-1), so this is cache-friendly.
-        for (int gx = 0; gx < glyph_w_; gx++) {
-            int base = (x + gx) * phys_w_ + (phys_w_ - 1 - ly);
-            for (int gy = 0; gy < glyph_h_; gy++) {
-                if (mask[gy * glyph_w_ + gx])
-                    raw[base - gy] = color;
-            }
-        }
-        x += glyph_w_;
-    }
+    fast_text_init(fb);
 }
 
 void MatsuMonsterTerminal::setInputQueue(QueueHandle_t q)
@@ -1457,7 +1374,7 @@ void MatsuMonsterTerminal::render()
         // CW rotation maps logical cols 0..panel_x-1 to physical rows
         // 0..panel_x-1 (contiguous), so a single memset does the job.
         uint16_t *raw = (uint16_t *)pax_buf_get_pixels(fb_);
-        memset(raw, 0, panel_x * phys_w_ * sizeof(uint16_t));
+        memset(raw, 0, panel_x * 480 * sizeof(uint16_t));
 
         drawHeader();
         drawScrollbackFast();
@@ -1540,7 +1457,7 @@ void MatsuMonsterTerminal::drawScrollback()
 
 void MatsuMonsterTerminal::drawScrollbackFast()
 {
-    if (!glyph_mask_) { drawScrollback(); return; }
+    if (!fast_text_glyph_w()) { drawScrollback(); return; }
 
     int top    = HEADER_H + 4;
     int bottom = canvas_h_ - INPUT_H - 4;
@@ -1559,14 +1476,14 @@ void MatsuMonsterTerminal::drawScrollbackFast()
     for (int i = oldest_visible; i <= newest_visible; ++i) {
         if (i < last_index - scroll_fill_ + 1) { y += LINE_PX; continue; }
         int idx = ((i % SCROLL_LINES) + SCROLL_LINES) % SCROLL_LINES;
-        blitTextFast(MARGIN_X, y, scroll_[idx], COLOR_TEXT, panel_x);
+        fast_text_blit(fb_,MARGIN_X, y, scroll_[idx], COLOR_TEXT, panel_x);
         y += LINE_PX;
     }
 
     if (scroll_offset_ > 0) {
         char hint[16];
         snprintf(hint, sizeof(hint), "[-%d]", scroll_offset_);
-        blitTextFast(panel_x - 60, top, hint, COLOR_DIM, panel_x);
+        fast_text_blit(fb_,panel_x - 60, top, hint, COLOR_DIM, panel_x);
     }
 }
 

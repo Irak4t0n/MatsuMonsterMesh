@@ -15,6 +15,7 @@ extern "C" {
 #include "pax_fonts.h"
 #include "pax_text.h"
 
+#include "FastText.h"
 #include "meshtastic_proto.h"
 
 static const char *TAG = "mchat";
@@ -54,6 +55,7 @@ void MeshtasticChatView::setRenderTarget(pax_buf_t *fb, int canvas_w, int canvas
     canvas_w_ = canvas_w;
     canvas_h_ = canvas_h;
     dirty_    = true;
+    fast_text_init(fb);
 }
 
 void MeshtasticChatView::setInputQueue(QueueHandle_t q)
@@ -219,15 +221,16 @@ void MeshtasticChatView::render()
         status_until_ms_ = 0;
     }
 
-    pax_background(fb_, COLOR_BG);
+    // Clear the entire framebuffer directly — CW rotation maps logical
+    // x-columns to contiguous physical rows, so a single memset works.
+    uint16_t *raw = (uint16_t *)pax_buf_get_pixels(fb_);
+    memset(raw, 0, canvas_w_ * 480 * sizeof(uint16_t));
+
     drawTitleBar();
     drawChatLog();
     drawComposeBox();
     drawHelpLine();
 
-    // Same blit convention as the terminal: PAX renders into a buffer
-    // rotated 90° CW from the panel's native portrait orientation, so
-    // we swap width/height when handing to the blit.
     bsp_display_blit(0, 0, canvas_h_, canvas_w_, pax_buf_get_pixels(fb_));
 
     dirty_          = false;
@@ -236,28 +239,24 @@ void MeshtasticChatView::render()
 
 void MeshtasticChatView::drawTitleBar()
 {
-    // Resolve our own short name through the NodeDB so the title reflects
-    // any future per-device customisation cleanly.
     char who[16];
     meshtastic_format_node(meshtastic_proto_node_id(), who, sizeof(who));
 
     char title[64];
     snprintf(title, sizeof(title), "MatsuMesh: %s", who);
+    fast_text_blit(fb_, MARGIN_X, 4, title, COLOR_TITLE, canvas_w_);
 
-    pax_draw_text(fb_, COLOR_TITLE, pax_font_sky_mono, FONT_PX,
-                  MARGIN_X, 4, title);
-
-    // Right-aligned counters: node count + total messages.
+    // Right-aligned counters.
     meshtastic_node_entry_t nodes[MESHTASTIC_NODEDB_CAP];
     size_t nn = meshtastic_nodedb_snapshot(nodes, MESHTASTIC_NODEDB_CAP);
     uint32_t total = meshtastic_chat_total();
     char r[48];
     snprintf(r, sizeof(r), "%u nodes  %u msgs",
              (unsigned)nn, (unsigned)total);
-    pax_vec1_t sz = pax_text_size(pax_font_sky_mono, FONT_PX, r);
-    pax_draw_text(fb_, COLOR_TIME, pax_font_sky_mono, FONT_PX,
-                  canvas_w_ - MARGIN_X - (int)sz.x, 4, r);
+    int rw = (int)strlen(r) * fast_text_glyph_w();
+    fast_text_blit(fb_, canvas_w_ - MARGIN_X - rw, 4, r, COLOR_TIME, canvas_w_);
 
+    // Divider line — thin enough that pax is fine here.
     pax_draw_rect(fb_, COLOR_DIVIDER, 0, TITLE_H, canvas_w_, 1);
 }
 
@@ -273,15 +272,12 @@ void MeshtasticChatView::drawChatLog()
     meshtastic_chat_entry_t entries[MESHTASTIC_CHAT_DEPTH];
     size_t n = meshtastic_chat_snapshot(entries, MESHTASTIC_CHAT_DEPTH);
     if (n == 0) {
-        pax_draw_text(fb_, COLOR_HELP, pax_font_sky_mono, FONT_PX,
-                      MARGIN_X, top,
-                      "(no messages yet — wait for an announce or type and Enter)");
+        fast_text_blit(fb_, MARGIN_X, top,
+                       "(no messages yet -- wait for an announce or type and Enter)",
+                       COLOR_HELP, canvas_w_);
         return;
     }
 
-    // We have `n` messages newest-first. We want to draw newest at the
-    // bottom, scrolling older up. With a scroll_offset_, the bottom
-    // visible message is the (scroll_offset_)'th newest.
     int first_idx = scroll_offset_;
     if (first_idx >= (int)n) first_idx = (int)n - 1;
     if (first_idx < 0)       first_idx = 0;
@@ -304,13 +300,11 @@ void MeshtasticChatView::drawChatLog()
         else if (age < 3600) snprintf(age_s, sizeof(age_s), "%um",  (unsigned)(age / 60));
         else                 snprintf(age_s, sizeof(age_s), "%uh",  (unsigned)(age / 3600));
 
-        // Format: "[age]  WHO: text"
         char line[160];
         snprintf(line, sizeof(line), "[%s] %s: %s", age_s, who, e.text);
 
         uint32_t color = e.is_self ? COLOR_SELF : COLOR_PEER;
-        pax_draw_text(fb_, color, pax_font_sky_mono, FONT_PX,
-                      MARGIN_X, y, line);
+        fast_text_blit(fb_, MARGIN_X, y, line, color, canvas_w_);
         y -= LINE_PX;
     }
 }
@@ -321,14 +315,13 @@ void MeshtasticChatView::drawComposeBox()
     pax_draw_rect(fb_, COLOR_DIVIDER, 0, y, canvas_w_, 1);
 
     int text_y = y + 4;
-    pax_draw_text(fb_, COLOR_PROMPT, pax_font_sky_mono, FONT_PX,
-                  MARGIN_X, text_y, ">");
-    pax_draw_text(fb_, COLOR_COMPOSE, pax_font_sky_mono, FONT_PX,
-                  MARGIN_X + 14, text_y, compose_);
+    int gw = fast_text_glyph_w();
+    fast_text_blit(fb_, MARGIN_X, text_y, ">", COLOR_PROMPT, canvas_w_);
+    int compose_x = MARGIN_X + gw + gw;  // "> " = 2 glyph widths
+    fast_text_blit(fb_, compose_x, text_y, compose_, COLOR_COMPOSE, canvas_w_);
 
     if (cursor_on_) {
-        pax_vec1_t sz = pax_text_size(pax_font_sky_mono, FONT_PX, compose_);
-        int cx = MARGIN_X + 14 + (int)sz.x + 1;
+        int cx = compose_x + (int)compose_len_ * gw + 1;
         pax_draw_rect(fb_, COLOR_CURSOR, cx, text_y + 2, 6, FONT_PX);
     }
 }
@@ -338,13 +331,11 @@ void MeshtasticChatView::drawHelpLine()
     int y = canvas_h_ - HELP_H + 2;
     pax_draw_rect(fb_, COLOR_DIVIDER, 0, canvas_h_ - HELP_H, canvas_w_, 1);
 
-    // If a status is active, show it (in green) — otherwise show keys.
     if (status_line_[0]) {
-        pax_draw_text(fb_, COLOR_STATUS, pax_font_sky_mono, FONT_PX,
-                      MARGIN_X, y, status_line_);
+        fast_text_blit(fb_, MARGIN_X, y, status_line_, COLOR_STATUS, canvas_w_);
     } else {
-        pax_draw_text(fb_, COLOR_HELP, pax_font_sky_mono, FONT_PX,
-                      MARGIN_X, y,
-                      "Enter=send  Esc=back  Up/Dn=scroll  Fn+T=terminal");
+        fast_text_blit(fb_, MARGIN_X, y,
+                       "Enter=send  Esc=back  Up/Dn=scroll  Fn+T=terminal",
+                       COLOR_HELP, canvas_w_);
     }
 }

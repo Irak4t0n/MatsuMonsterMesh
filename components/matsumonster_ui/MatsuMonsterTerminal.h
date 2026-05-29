@@ -133,15 +133,6 @@ private:
     void drawScrollbackFast();   // direct-to-framebuffer, bypasses pax rotation
     void drawInputLine();
 
-    // ── Fast glyph cache (bypasses pax CW rotation for text rendering) ─────
-    void initGlyphCache();
-    void blitTextFast(int lx, int ly, const char *text,
-                      uint32_t color_argb, int max_x);
-    uint8_t  *glyph_mask_ = nullptr;  // 1-byte-per-pixel mask, 96 glyphs
-    int       glyph_w_    = 0;        // rendered glyph width in pixels
-    int       glyph_h_    = 0;        // rendered glyph height in pixels
-    int       phys_w_     = 0;        // physical buffer width (480)
-
     // Right-side context panel — populated based on the current state:
     // a battle in progress shows the player's moves 1-4 + HP for both
     // sides; otherwise it shows the live party + a quick command list.
