@@ -87,6 +87,15 @@ uint8_t meshtastic_channel_count(void);
 void meshtastic_channel_set_tx(uint8_t index);
 uint8_t meshtastic_channel_get_tx(void);
 
+// Reset channels to factory defaults (LongFast + MonsterMesh) and save to NVS.
+void meshtastic_channel_reset(void);
+
+// Unread message counter — incremented by the drain task on each inbound
+// TextMessage, cleared by the chat UI on entry. Used by the notification
+// overlay to show a badge while the user is in the emulator.
+uint32_t meshtastic_chat_unread(void);
+void     meshtastic_chat_clear_unread(void);
+
 // Common Data.portnum values (subset of upstream meshtastic.PortNum proto
 // enum — see firmware/protobufs/portnums.proto). Surfaced so the terminal
 // can label decrypted packets without dragging in the full nanopb stack

@@ -124,6 +124,8 @@ private:
     void cmdChAdd(const char *args);
     void cmdChDel(const char *args);
     void cmdChSet(const char *args);
+    void cmdChReset();
+    void cmdClear();
     void cmdQuit();
 
     // ── Internal helpers ────────────────────────────────────────────────────

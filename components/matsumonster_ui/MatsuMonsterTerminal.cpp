@@ -600,6 +600,8 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "ch_add",  &args))    cmdChAdd(args);
     else if (starts_with(cmd, "ch_del",  &args))    cmdChDel(args);
     else if (starts_with(cmd, "ch_set",  &args))    cmdChSet(args);
+    else if (starts_with(cmd, "ch_reset", &args))   cmdChReset();
+    else if (starts_with(cmd, "clear",  &args))  cmdClear();
     else if (starts_with(cmd, "quit",   &args))  cmdQuit();
     else if (starts_with(cmd, "exit",   &args))  cmdQuit();
     else if (starts_with(cmd, "help",   &args))  cmdHelp();
@@ -628,9 +630,11 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  lora_tx_test N— send N-byte dummy packet (find TX size limit)");
     println("  mqtt_status   — show MQTT/WiFi connection state");
     println("  ch_list       — list configured channels");
-    println("  ch_add <n> <k>— add channel (name, 16-byte hex PSK)");
+    println("  ch_add <n> <k>— add channel (name + hex PSK or 'default')");
     println("  ch_del <N>    — remove channel N (1-8)");
     println("  ch_set <N>    — set active TX channel (1-8)");
+    println("  ch_reset      — restore default channels (LongFast + MonsterMesh)");
+    println("  clear         — clear scrollback");
     println("  quit          — back to emulator");
 }
 
@@ -1413,11 +1417,20 @@ static int hex_to_bytes(const char *hex, uint8_t *out, int max_out)
     return n;
 }
 
+// Standard Meshtastic default key (used by all preset channels: LongFast,
+// LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, etc.)
+static const uint8_t MESHTASTIC_DEFAULT_KEY[16] = {
+    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
+    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01
+};
+
 void MatsuMonsterTerminal::cmdChAdd(const char *args)
 {
     if (!args || !*args) {
         println("Usage: ch_add <name> <hex-psk>");
-        println("  PSK: 32 hex chars (16 bytes)");
+        println("       ch_add <name> default");
+        println("  'default' uses the standard Meshtastic PSK");
+        println("  Example: ch_add LongSlow default");
         println("  Example: ch_add MyChannel d4f1bb3a20290759f0bcffabcf4e6901");
         return;
     }
@@ -1434,12 +1447,17 @@ void MatsuMonsterTerminal::cmdChAdd(const char *args)
     uint8_t psk[32] = {};
     uint8_t psk_len = 0;
     if (*p) {
-        int n = hex_to_bytes(p, psk, 32);
-        if (n != 16 && n != 32) {
-            println("PSK must be 16 or 32 bytes (32 or 64 hex chars)");
-            return;
+        if (strncmp(p, "default", 7) == 0) {
+            memcpy(psk, MESHTASTIC_DEFAULT_KEY, 16);
+            psk_len = 16;
+        } else {
+            int n = hex_to_bytes(p, psk, 32);
+            if (n != 16 && n != 32) {
+                println("PSK must be 16 or 32 bytes, or 'default'");
+                return;
+            }
+            psk_len = (uint8_t)n;
         }
-        psk_len = (uint8_t)n;
     }
 
     int idx = meshtastic_channel_add(name, psk, psk_len);
@@ -1493,6 +1511,22 @@ void MatsuMonsterTerminal::cmdChSet(const char *args)
     }
     meshtastic_channel_set_tx((uint8_t)idx);
     printf_line("Active TX channel: %d (%s)", idx + 1, ch->name);
+}
+
+void MatsuMonsterTerminal::cmdChReset()
+{
+    meshtastic_channel_reset();
+    println("Channels reset to defaults (LongFast + MonsterMesh)");
+    cmdChList();
+}
+
+void MatsuMonsterTerminal::cmdClear()
+{
+    memset(scroll_, 0, sizeof(scroll_));
+    scroll_head_ = 0;
+    scroll_fill_ = 0;
+    scroll_offset_ = 0;
+    dirty_ = true;
 }
 
 void MatsuMonsterTerminal::cmdQuit()

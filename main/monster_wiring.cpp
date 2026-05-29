@@ -370,6 +370,7 @@ extern "C" void monster_enter_chat(void)
         mm_audio_pause();
     }
     s_state = MONSTER_STATE_CHAT;
+    meshtastic_chat_clear_unread();
     if (s_chat) {
         s_chat->clearExitFlag();
         s_chat->clearTerminalJump();

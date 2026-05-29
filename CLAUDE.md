@@ -14,11 +14,14 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - Configurable multi-channel system: up to 8 Meshtastic channels (LongFast + MonsterMesh pre-populated), persisted to NVS
 - Channel-aware RX decryption: iterates all registered channel keys (replaces hardcoded fallback)
 - Channel-aware TX: encrypts with active channel's PSK and hash
-- Terminal commands: ch_list, ch_add, ch_del, ch_set for channel management
+- Terminal commands: ch_list, ch_add, ch_del, ch_set, ch_reset, clear for channel management
 - Chat UI side panel showing channel list, active channel info, node count, MQTT status
 - Fn+1..8 hotkeys in chat UI to switch active TX channel
 - MQTT transport: WiFi auto-connect, TLS to EMQX broker, TX hook publishes beacons, RX logging
 - mqtt_status terminal command for on-device MQTT/WiFi diagnostics
+- Channel presets: `ch_add <name> default` uses standard Meshtastic PSK
+- Unread message badge in emulator overlay (top-right `[N] Fn+M`)
+- Chat message wrapping: long messages wrap to multiple visual lines
 - Full 122-byte DaycareBeacon TX matching upstream struct (including ngPlusTier field)
 - Meshtastic chat UI (Fn+M) and terminal (Fn+T) both functional
 - Daycare auto-check-in from live emulator SRAM on ROM load

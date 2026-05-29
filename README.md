@@ -97,8 +97,9 @@ in the badge-bsp managed component for the full pin map.
   channel registry decryption (iterates all registered keys),
   TEXT_MESSAGE_APP + PRIVATE_APP portnum routing
 - **Chat UI** (Fn+M): full Meshtastic chat view with compose bar
-  (up to 200 chars), message history, side panel showing channel list /
-  MQTT status / node count, and in-emulator notification overlay
+  (up to 200 chars), message history with word-wrap, side panel showing
+  channel list / MQTT status / node count, and in-emulator notification
+  overlay with unread message badge
 - **MQTT transport**: WiFi auto-connect, TLS to EMQX broker,
   TX hook publishes daycare beacons, RX injection into LoRa pipeline,
   auto-reconnect on WiFi drop. `mqtt_status` terminal command for

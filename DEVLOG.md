@@ -9,6 +9,20 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 29 2026 — Chat wrapping, presets, unread badge, clear/reset (Session 11 cont.)
+
+### Changes
+- **Chat message wrapping**: long messages in the chat log wrap to multiple visual
+  lines within the left panel, filling bottom-up (same pattern as terminal scrollback)
+- **Channel presets**: `ch_add <name> default` uses the standard Meshtastic PSK
+  (e.g. `ch_add LongSlow default`, `ch_add MediumFast default`)
+- **`ch_reset` command**: wipes NVS and restores defaults (LongFast + MonsterMesh)
+- **`clear` command**: wipes terminal scrollback buffer
+- **Unread message badge**: when messages arrive while in the emulator, a `[N] Fn+M`
+  badge appears in the top-right corner of the GBC screen. Opening chat clears it.
+
+---
+
 ## Session May 29 2026 — Channel NVS persistence (Session 11 cont.)
 
 ### Changes

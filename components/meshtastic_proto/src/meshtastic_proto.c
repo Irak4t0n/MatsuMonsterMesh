@@ -213,6 +213,14 @@ void meshtastic_channel_set_tx(uint8_t index)
 
 uint8_t meshtastic_channel_get_tx(void) { return s_tx_channel; }
 
+void meshtastic_channel_reset(void)
+{
+    channel_registry_defaults();
+    s_tx_channel = 0;
+    channel_registry_save();
+    ESP_LOGI(TAG, "channel registry reset to defaults");
+}
+
 // Build the 16-byte CTR nonce per CryptoEngine::initNonce in upstream.
 // nonce[0..7]  = packet_id as 64-bit LE (upper 32 bits zero on the wire)
 // nonce[8..11] = from_node as 32-bit LE
@@ -393,6 +401,7 @@ static SemaphoreHandle_t       s_chat_mtx   = NULL;
 // chat_push (below) can reference it before the setter implementation
 // further down the file.
 static meshtastic_chat_notify_cb_t s_chat_notify_cb = NULL;
+static volatile uint32_t           s_chat_unread    = 0;
 
 static void chat_init(void)
 {
@@ -502,6 +511,7 @@ static void chat_push(uint32_t from, uint32_t pkt_id, bool is_self,
     xSemaphoreGive(s_chat_mtx);
 
     if (fire_cb) {
+        s_chat_unread++;
         char who[16];
         meshtastic_format_node(cb_from, who, sizeof(who));
         s_chat_notify_cb(cb_from, who, cb_text);
@@ -530,6 +540,9 @@ uint32_t meshtastic_chat_total(void)
     xSemaphoreGive(s_chat_mtx);
     return v;
 }
+
+uint32_t meshtastic_chat_unread(void)   { return s_chat_unread; }
+void     meshtastic_chat_clear_unread(void) { s_chat_unread = 0; }
 
 // Setter for the s_chat_notify_cb hook declared at the top of the file.
 void meshtastic_proto_set_chat_notify_cb(meshtastic_chat_notify_cb_t cb)

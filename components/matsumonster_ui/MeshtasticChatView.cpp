@@ -301,11 +301,15 @@ void MeshtasticChatView::drawChatLog()
         return;
     }
 
+    int gw = fast_text_glyph_w();
+    int chars_per_line = (gw > 0) ? ((text_w - MARGIN_X * 2) / gw) : 40;
+    if (chars_per_line < 10) chars_per_line = 10;
+
     int first_idx = scroll_offset_;
     if (first_idx >= (int)n) first_idx = (int)n - 1;
     if (first_idx < 0)       first_idx = 0;
 
-    // Fill from bottom up.
+    // Fill from bottom up. Each chat entry may wrap to multiple visual lines.
     int y = bottom - LINE_PX;
     uint32_t now_v = now_ms();
     uint8_t active_tx = meshtastic_channel_get_tx();
@@ -330,12 +334,27 @@ void MeshtasticChatView::drawChatLog()
             snprintf(ch_tag, sizeof(ch_tag), "[%d]", e.channel_idx + 1);
         }
 
-        char line[180];
+        char line[280];
         snprintf(line, sizeof(line), "%s[%s] %s: %s", ch_tag, age_s, who, e.text);
 
         uint32_t color = e.is_self ? COLOR_SELF : COLOR_PEER;
-        fast_text_blit(fb_, MARGIN_X, y, line, color, text_w);
-        y -= LINE_PX;
+        int len = (int)strlen(line);
+
+        // Calculate how many visual lines this entry needs
+        int num_lines = (len + chars_per_line - 1) / chars_per_line;
+        if (num_lines < 1) num_lines = 1;
+
+        // Render wrapped lines bottom-up so the last segment is at y
+        for (int wl = num_lines - 1; wl >= 0 && y >= top; wl--) {
+            int start = wl * chars_per_line;
+            int take  = len - start;
+            if (take > chars_per_line) take = chars_per_line;
+            char seg[280];
+            memcpy(seg, line + start, take);
+            seg[take] = '\0';
+            fast_text_blit(fb_, MARGIN_X, y, seg, color, text_w);
+            y -= LINE_PX;
+        }
     }
 }
 

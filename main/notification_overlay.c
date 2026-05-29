@@ -105,48 +105,51 @@ void notification_overlay_init(uint8_t *render_buf_a, uint8_t *render_buf_b)
 
 void notification_overlay_render(uint8_t *gbc_buf)
 {
-    if (!s_inited || !s_state.active) return;
-
-    uint32_t now_v = now_ms();
-    if (now_v >= s_state.expire_ms) {
-        // Time's up — flip inactive. The GBC raster on the next
-        // emulator frame will paint over our pixels for the part of
-        // the banner that overlaps its rendered area. The letterbox
-        // bars also get cleared by gnuboy's memset every frame.
-        s_state.active = false;
-        return;
-    }
+    if (!s_inited) return;
 
     pax_buf_t *pax = (gbc_buf == s_buf_a) ? &s_pax_a : &s_pax_b;
-
-    // Banner: a 36-pixel-tall horizontal strip across the top of the
-    // landscape view. The PAX_O_ROT_CW orientation we set up in init()
-    // means pax's reported (width, height) is (800, 480) — landscape.
     static const int W = 800;
-    static const int H = 36;
 
-    // Black background with a thin coloured underline so it's visually
-    // distinct from any in-game UI.
-    pax_draw_rect(pax, 0xCC000000, 0, 0, W, H);
-    pax_draw_rect(pax, 0xFF00FFAA, 0, H - 2, W, 2);
+    uint32_t now_v = now_ms();
+    bool toast_active = s_state.active && (now_v < s_state.expire_ms);
 
-    // "<NAME>: <text>" — sender label in mint, text in white. The two
-    // calls keep the colours apart without resorting to multi-coloured
-    // text spans (pax-gfx doesn't have those).
-    char prefix[24];
-    snprintf(prefix, sizeof(prefix), "%s:", s_state.who);
-    pax_draw_text(pax, 0xFF00FFAA, pax_font_sky_mono, 16,
-                  8, 8, prefix);
+    if (toast_active) {
+        // Full banner: 36px tall strip across the top.
+        static const int H = 36;
+        pax_draw_rect(pax, 0xCC000000, 0, 0, W, H);
+        pax_draw_rect(pax, 0xFF00FFAA, 0, H - 2, W, 2);
 
-    pax_vec1_t psz = pax_text_size(pax_font_sky_mono, 16, prefix);
-    pax_draw_text(pax, 0xFFFFFFFF, pax_font_sky_mono, 16,
-                  8 + (int)psz.x + 8, 8, s_state.text);
+        char prefix[24];
+        snprintf(prefix, sizeof(prefix), "%s:", s_state.who);
+        pax_draw_text(pax, 0xFF00FFAA, pax_font_sky_mono, 16,
+                      8, 8, prefix);
 
-    // Right-aligned "Fn+M" hint so the user knows how to read more.
-    static const char *hint = "Fn+M";
-    pax_vec1_t hsz = pax_text_size(pax_font_sky_mono, 14, hint);
-    pax_draw_text(pax, 0xFF808080, pax_font_sky_mono, 14,
-                  W - (int)hsz.x - 8, 10, hint);
+        pax_vec1_t psz = pax_text_size(pax_font_sky_mono, 16, prefix);
+        pax_draw_text(pax, 0xFFFFFFFF, pax_font_sky_mono, 16,
+                      8 + (int)psz.x + 8, 8, s_state.text);
+
+        // Right-aligned "Fn+M" hint.
+        static const char *hint = "Fn+M";
+        pax_vec1_t hsz = pax_text_size(pax_font_sky_mono, 14, hint);
+        pax_draw_text(pax, 0xFF808080, pax_font_sky_mono, 14,
+                      W - (int)hsz.x - 8, 10, hint);
+    } else {
+        if (s_state.active) s_state.active = false;
+
+        // Small unread badge in the top-right corner when toast is gone.
+        uint32_t unread = meshtastic_chat_unread();
+        if (unread > 0) {
+            char badge[24];
+            snprintf(badge, sizeof(badge), "[%u] Fn+M", (unsigned)unread);
+            pax_vec1_t bsz = pax_text_size(pax_font_sky_mono, 14, badge);
+            int bx = W - (int)bsz.x - 8;
+            int by = 4;
+            pax_draw_rect(pax, 0xCC000000, bx - 4, by - 2,
+                          (int)bsz.x + 8, 18);
+            pax_draw_text(pax, 0xFF00FF88, pax_font_sky_mono, 14,
+                          bx, by, badge);
+        }
+    }
 }
 
 void notification_overlay_dismiss(void)
