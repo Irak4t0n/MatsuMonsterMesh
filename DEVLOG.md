@@ -9,6 +9,35 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 28 2026 — Terminal glyph cache: 100x scrollback speedup (Session 10)
+
+### Goal
+Fix sluggish terminal scrolling — scrolling through `help` output was ~1 FPS.
+
+### Root Cause
+`pax_draw_text()` through `PAX_O_ROT_CW` orientation applies a per-pixel
+coordinate transform for every glyph pixel. Drawing ~31 lines of scrollback
+cost **~640ms per frame** (measured via ESP_LOGI instrumentation).
+
+### Fix: Direct-to-framebuffer glyph cache
+- **`initGlyphCache()`**: at boot, renders every printable ASCII char (32–127)
+  into a tiny unrotated `pax_buf_t`, extracts a 1-byte-per-pixel mask (~8KB).
+- **`blitTextFast()`**: writes RGB565 pixels directly into the raw framebuffer
+  using the known CW rotation mapping: `offset = lx * 480 + (479 - ly)`.
+  Column-major iteration gives contiguous physical memory access.
+- **`drawScrollbackFast()`**: replaces `drawScrollback()` in the heavy render
+  path. Falls back to pax if the glyph cache failed to init.
+- **Left-region clear**: `memset(raw, 0, ...)` replaces `pax_draw_rect()`
+  (~10ms → <1ms). CW rotation maps logical cols 0..panel_x to contiguous
+  physical rows, so a single memset works.
+- **Bottom-anchored scrollback**: text fills up from the input line; empty
+  space (when fewer lines than max) appears at the top, not as a gap above
+  the prompt.
+
+**Result:** Full scrollback render dropped from ~640ms to <5ms (~100x speedup).
+
+---
+
 ## Session May 28 2026 — Gen 2 support + terminal performance (Session 9)
 
 ### Goal

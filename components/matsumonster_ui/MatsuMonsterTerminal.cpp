@@ -207,11 +207,96 @@ MatsuMonsterTerminal::MatsuMonsterTerminal(PokemonDaycare        *daycare,
     }
 }
 
+// Convert ARGB8888 to RGB565.
+static inline uint16_t argb_to_565(uint32_t argb) {
+    uint8_t r = (argb >> 16) & 0xFF;
+    uint8_t g = (argb >>  8) & 0xFF;
+    uint8_t b =  argb        & 0xFF;
+    return (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
 void MatsuMonsterTerminal::setRenderTarget(pax_buf_t *fb, int canvas_w, int canvas_h)
 {
     fb_       = fb;
     canvas_w_ = canvas_w;
     canvas_h_ = canvas_h;
+    initGlyphCache();
+}
+
+// Pre-render every printable ASCII glyph (32–127) into a 1-byte-per-pixel
+// mask so drawScrollbackFast() can blit text directly into the raw
+// framebuffer, bypassing pax's per-pixel CW-rotation transform.  That
+// transform is the sole reason drawScrollback() took 600+ ms per frame.
+void MatsuMonsterTerminal::initGlyphCache()
+{
+    if (!fb_) return;
+
+    pax_vec2f sz = pax_text_size(pax_font_sky_mono, FONT_PX, "X");
+    glyph_w_ = (int)(sz.x + 0.5f);
+    glyph_h_ = (int)(sz.y + 0.5f);
+    if (glyph_w_ <= 0 || glyph_h_ <= 0) return;
+
+    // Physical (portrait) buffer width — the short axis of the display.
+    phys_w_ = 480;
+
+    int glyph_pixels = glyph_w_ * glyph_h_;
+    glyph_mask_ = (uint8_t *)calloc(96 * glyph_pixels, 1);
+    if (!glyph_mask_) {
+        ESP_LOGE("term", "glyph cache alloc failed");
+        return;
+    }
+
+    // Tiny unrotated temp buffer — same pixel format as fb_, no orientation.
+    pax_buf_t tmp;
+    pax_buf_init(&tmp, NULL, glyph_w_, glyph_h_, pax_buf_get_type(fb_));
+
+    char str[2] = {0, 0};
+    for (int ch = 32; ch < 128; ch++) {
+        pax_background(&tmp, 0xFF000000);   // black
+        str[0] = (char)ch;
+        pax_draw_text(&tmp, 0xFFFFFFFF, pax_font_sky_mono, FONT_PX, 0, 0, str);
+
+        // Extract binary mask: any non-zero pixel → 1.
+        uint16_t *pixels = (uint16_t *)pax_buf_get_pixels(&tmp);
+        uint8_t  *mask   = &glyph_mask_[(ch - 32) * glyph_pixels];
+        for (int i = 0; i < glyph_pixels; i++)
+            mask[i] = (pixels[i] != 0) ? 1 : 0;
+    }
+
+    pax_buf_destroy(&tmp);
+    ESP_LOGI("term", "glyph cache ready: %dx%d per glyph, %d bytes",
+             glyph_w_, glyph_h_, 96 * glyph_pixels);
+}
+
+// Blit a NUL-terminated string at logical coordinates (lx, ly) directly
+// into the raw framebuffer using the known CW rotation mapping:
+//   logical(lx, ly) → physical(479-ly, lx) → offset = lx * 480 + (479 - ly)
+void MatsuMonsterTerminal::blitTextFast(int lx, int ly, const char *text,
+                                         uint32_t color_argb, int max_x)
+{
+    if (!glyph_mask_ || !fb_) return;
+    uint16_t *raw   = (uint16_t *)pax_buf_get_pixels(fb_);
+    uint16_t  color = argb_to_565(color_argb);
+    int glyph_pixels = glyph_w_ * glyph_h_;
+
+    int x = lx;
+    for (int ci = 0; text[ci] && x + glyph_w_ <= max_x; ci++) {
+        char ch = text[ci];
+        if (ch < 32 || ch > 127) ch = '?';
+
+        const uint8_t *mask = &glyph_mask_[(ch - 32) * glyph_pixels];
+
+        // Column-major iteration: each column maps to contiguous physical
+        // memory (adjacent gy → offset-1), so this is cache-friendly.
+        for (int gx = 0; gx < glyph_w_; gx++) {
+            int base = (x + gx) * phys_w_ + (phys_w_ - 1 - ly);
+            for (int gy = 0; gy < glyph_h_; gy++) {
+                if (mask[gy * glyph_w_ + gx])
+                    raw[base - gy] = color;
+            }
+        }
+        x += glyph_w_;
+    }
 }
 
 void MatsuMonsterTerminal::setInputQueue(QueueHandle_t q)
@@ -1362,40 +1447,35 @@ void MatsuMonsterTerminal::render()
     if (!fb_ || canvas_w_ <= 0 || canvas_h_ <= 0) return;
     if (!dirty_ && !panel_dirty_ && !input_only_dirty_) return;
 
-    // Throttle the heavy redraw paths; the fast input-line path is small
-    // enough that running at full pump cadence keeps typing responsive.
-    uint32_t t = now_ms();
     bool need_heavy = dirty_ || panel_dirty_;
-    if (need_heavy && (t - last_render_ms_ < 33)) return;
-    last_render_ms_ = t;
+    last_render_ms_ = now_ms();
 
     int panel_x = canvas_w_ - PANEL_W;
 
     if (need_heavy) {
-        // Clear + redraw the left region (header + scrollback + input).
-        // Only touch the panel when panel_dirty_ is set — this avoids
-        // expensive WRAM reads and party rebuilds on every println().
-        pax_draw_rect(fb_, COLOR_BG, 0, 0, panel_x, canvas_h_);
+        // Clear the left region by zeroing the raw framebuffer directly.
+        // CW rotation maps logical cols 0..panel_x-1 to physical rows
+        // 0..panel_x-1 (contiguous), so a single memset does the job.
+        uint16_t *raw = (uint16_t *)pax_buf_get_pixels(fb_);
+        memset(raw, 0, panel_x * phys_w_ * sizeof(uint16_t));
+
         drawHeader();
-        drawScrollback();
+        drawScrollbackFast();
         drawInputLine();
 
         if (panel_dirty_) {
             pax_draw_rect(fb_, COLOR_BG, panel_x, 0, PANEL_W, canvas_h_);
             drawSidePanel();
         }
+        bsp_display_blit(0, 0, canvas_h_, canvas_w_, pax_buf_get_pixels(fb_));
     } else {
-        // Fast path: only the input line + cursor changed (typing, blink).
         int strip_y = canvas_h_ - INPUT_H - 8;
         pax_draw_rect(fb_, COLOR_BG, 0, strip_y,
                       panel_x, canvas_h_ - strip_y);
         drawInputLine();
+        bsp_display_blit(0, 0, canvas_h_, canvas_w_, pax_buf_get_pixels(fb_));
     }
 
-    // canvas_w_ × canvas_h_ are the post-rotation user-coord dimensions
-    // (e.g. 800×480 landscape). bsp_display_blit needs the panel's NATIVE
-    // memory dimensions (e.g. 480 wide × 800 tall portrait), so swap.
-    bsp_display_blit(0, 0, canvas_h_, canvas_w_, pax_buf_get_pixels(fb_));
     dirty_            = false;
     panel_dirty_      = false;
     input_only_dirty_ = false;
@@ -1439,7 +1519,8 @@ void MatsuMonsterTerminal::drawScrollback()
     int newest_visible = last_index - scroll_offset_;
     int oldest_visible = newest_visible - shown + 1;
 
-    int y = top;
+    // Bottom-anchor: newest line sits just above the input separator.
+    int y = bottom - shown * LINE_PX;
     for (int i = oldest_visible; i <= newest_visible; ++i) {
         if (i < last_index - scroll_fill_ + 1) { y += LINE_PX; continue; }
         int idx = ((i % SCROLL_LINES) + SCROLL_LINES) % SCROLL_LINES;
@@ -1454,6 +1535,38 @@ void MatsuMonsterTerminal::drawScrollback()
         snprintf(hint, sizeof(hint), "[-%d]", scroll_offset_);
         pax_draw_text(fb_, COLOR_DIM, pax_font_sky_mono, FONT_PX,
                       canvas_w_ - PANEL_W - 60, top, hint);
+    }
+}
+
+void MatsuMonsterTerminal::drawScrollbackFast()
+{
+    if (!glyph_mask_) { drawScrollback(); return; }
+
+    int top    = HEADER_H + 4;
+    int bottom = canvas_h_ - INPUT_H - 4;
+    int height = bottom - top;
+    int max_lines = height / LINE_PX;
+    if (max_lines <= 0) return;
+
+    int panel_x = canvas_w_ - PANEL_W;
+    int last_index = scroll_head_ - 1;
+    int shown = (scroll_fill_ < max_lines) ? scroll_fill_ : max_lines;
+    int newest_visible = last_index - scroll_offset_;
+    int oldest_visible = newest_visible - shown + 1;
+
+    // Bottom-anchor: newest line sits just above the input separator.
+    int y = bottom - shown * LINE_PX;
+    for (int i = oldest_visible; i <= newest_visible; ++i) {
+        if (i < last_index - scroll_fill_ + 1) { y += LINE_PX; continue; }
+        int idx = ((i % SCROLL_LINES) + SCROLL_LINES) % SCROLL_LINES;
+        blitTextFast(MARGIN_X, y, scroll_[idx], COLOR_TEXT, panel_x);
+        y += LINE_PX;
+    }
+
+    if (scroll_offset_ > 0) {
+        char hint[16];
+        snprintf(hint, sizeof(hint), "[-%d]", scroll_offset_);
+        blitTextFast(panel_x - 60, top, hint, COLOR_DIM, panel_x);
     }
 }
 

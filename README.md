@@ -80,7 +80,8 @@ in the badge-bsp managed component for the full pin map.
 - LORD save / Kanto gym roster data (compiled in, gameplay loop pending)
 - BattleLink wire protocol over Meshtastic PRIVATE_APP portnum
 - Fullscreen terminal UI rendered on top of the emulator (Fn+T to toggle),
-  with region-based rendering for responsive input
+  with direct-to-framebuffer glyph cache for smooth scrolling (~100x faster
+  than pax-through-rotation rendering)
 
 ### Meshtastic integration
 - **LoRa radio**: live on US 907.125 MHz LongFast via the C6

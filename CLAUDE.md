@@ -6,7 +6,7 @@ This project "MatsuMonsterMesh" combines two things:
 
 Players use LoRa radio to exchange daycare beacons and battle over the mesh — no internet required. The emulator's live SRAM is the source of truth for party data.
 
-## Current State (Session 9)
+## Current State (Session 10)
 
 - GBC emulation at ~60 FPS with save states, rewind, fast forward
 - Bidirectional daycare interop with upstream MonsterMesh on T-Deck verified on hardware
@@ -16,7 +16,8 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - Meshtastic chat UI (Alt+M) and terminal (Fn+T) both functional
 - Daycare auto-check-in from live emulator SRAM on ROM load
 - Gen 2 (Crystal/Gold/Silver) support: live WRAM party reading, daycare check-in, battle with move filtering
-- Terminal performance: region-based rendering, cached panel party data, reduced full redraws
+- Terminal scrollback: direct-to-framebuffer glyph cache bypasses pax CW rotation (~640ms → <5ms per frame)
+- Bottom-anchored scrollback layout: text fills up to the input line with no gap
 
 ## Rules
 
