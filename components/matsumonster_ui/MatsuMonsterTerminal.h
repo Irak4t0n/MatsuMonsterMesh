@@ -16,6 +16,7 @@
 #include "freertos/queue.h"
 #include "pax_gfx.h"
 #include "PokemonData.h"   // Gen1Party — used as the cached battle party
+#include "LordSave.h"      // LordSave — persistent LORD game state
 
 class PokemonDaycare;
 class MonsterMeshTextBattle;
@@ -106,6 +107,9 @@ private:
     void cmdFight(const char *args);
     void cmdRun();
     void cmdCatch();
+    void cmdGym(const char *args);
+    void cmdE4();
+    void cmdLord();
     // Path #3 Session 1 — raw-LoRa bring-up smoke tests.
     void cmdLoraSend(const char *args);
     void cmdLoraStats();
@@ -179,6 +183,19 @@ private:
     uint8_t   last_foe_species_ = 0;
     uint8_t   last_foe_level_   = 0;
     bool      xp_pending_       = false;
+
+    // LORD game state — persisted to /monstermesh/lord.dat
+    LordSave  lord_save_        = {};
+    bool      lord_loaded_      = false;
+
+    // Battle type tracking for gym/E4 progression on win.
+    enum class BattleType : uint8_t { WILD, GYM, E4 };
+    BattleType battle_type_     = BattleType::WILD;
+    uint8_t    battle_gym_idx_  = 0;   // which gym (0..7) or E4 member (0..4)
+    uint8_t    battle_trainer_  = 0;   // which trainer in gym (0..4)
+
+    void ensureLordLoaded();
+    void lordSaveAndReport();
 
     static const char *speciesName(uint8_t dexNum);
 };

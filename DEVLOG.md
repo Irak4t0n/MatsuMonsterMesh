@@ -9,6 +9,42 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 31 2026 — Elite Four, Routes, MQTT TX fix, LORD campaign (Session 13)
+
+### Changes
+- **MQTT TX callback bool return**: Changed `meshtastic_mqtt_tx_cb_t` from `void`
+  to `bool`. MonsterMesh channel is now MQTT-only — if MQTT is unavailable, the
+  packet is dropped (no LoRa fallback/leak). Other channels still go direct to LoRa.
+- **Elite Four + Champion**: Ported from upstream — 5 members (Lorelei, Bruno,
+  Agatha, Lance, Blue/Champion) with canonical Red/Blue rosters. Requires all 8
+  badges. Defeating Champion sets `leagueCleared=1` and increments NG+ tier.
+- **Wild encounter routes**: 8 badge-gated routes (Viridian Forest through
+  Cerulean Cave) with weighted-random species selection from Bulbapedia pools.
+  `run` command now picks routes based on badge count instead of hardcoded pool.
+- **NG+ scaling**: `lordScaleLevel()` forces gym/E4 pokemon to uniform levels
+  (60/70/80/90/100 for tiers 1-5). `lordApplyNgPlusMoves()` overlays STAB
+  coverage moves at tier 1+ and Hyper Beam at tier 3+.
+- **LordSave expansion**: Added `leagueCleared`, `ngPlusTier`, `e4Progress`
+  fields (carved from reserved bytes — backward compatible).
+- **Terminal commands**: `gym` (list/challenge), `e4` (Elite Four challenge),
+  `lord` (save summary). Battle completion auto-advances gym progress, awards
+  badges, clears league, and increments NG+ tier.
+- **Species nicknames**: Gym and E4 party builders now use actual species names
+  (e.g. "Geodude") instead of generic "FOE" in battle text.
+- **Unicode fix**: Replaced em dashes with ASCII hyphens in new command output
+  to avoid `???` rendering on the Tanmatsu's glyph cache.
+
+### Technical notes
+- LordE4.cpp/LordRoutes.cpp added to monster_core component
+- E4 party builder mirrors LordGyms pattern but adds NG+ level scaling and
+  coverage move overlays via LordLogic
+- Routes use `esp_random()` for weighted encounter selection + uniform level roll
+- `pumpBattle()` now tracks BattleType (WILD/GYM/E4) for LORD progression on win
+- E4 loss resets progress back to Lorelei (matches upstream behavior)
+- Binary grew ~22KB (route/E4 data tables + NG+ logic)
+
+---
+
 ## Session May 29 2026 — MQTT interop fix, NodeDB persistence, Fn+M from terminal (Session 12)
 
 ### Changes

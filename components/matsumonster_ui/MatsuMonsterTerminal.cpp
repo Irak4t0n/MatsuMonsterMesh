@@ -52,6 +52,10 @@ static inline bool mm_restart_to_meshtastic(void) {
 #include "DaycareSavPatcher.h"  // buildGen1Party, readPartyFromWRAM
 #include "PokemonData.h"        // Gen1Party
 #include "mqtt_transport.h"     // mqtt_transport_is_connected()
+#include "LordGyms.h"          // LORD gym rosters
+#include "LordE4.h"            // LORD Elite Four + Champion
+#include "LordRoutes.h"        // LORD route-based wild encounters
+#include "LordLogic.h"         // LORD progression logic + NG+
 
 // ── Layout constants (logical px) ───────────────────────────────────────────
 static constexpr int   FONT_PX      = 12;     // pax font size in px
@@ -374,23 +378,15 @@ void MatsuMonsterTerminal::pumpBattle()
                 uint8_t lead_dex = state.pokemon[0].speciesDex;
                 uint8_t prev_total_level = state.pokemon[0].savLevel +
                                             (uint8_t)state.pokemon[0].totalLevelsGained;
-                // Gen-1-flavoured XP curve approximation: foe_level * 8 —
-                // ~24 XP at L3, 40 at L5, 80 at L10. Tuned to feel right
-                // against the early-game wild pool without breaking pacing.
                 uint32_t xp = (uint32_t)last_foe_level_ * 8u;
 
                 uint8_t *buf = iemu_sram_data(sram_);
                 if (buf && iemu_sram_size(sram_) >=
                                DaycareSavPatcher::SAV_MIN_BYTES) {
-                    // Use patchPokemon directly (instead of checkout()) so
-                    // we get the new level back for the daycare counters.
                     uint8_t new_level =
                         DaycareSavPatcher::patchPokemon(buf, 0, lead_dex, xp);
                     DaycareSavPatcher::fixChecksum(buf);
                     iemu_sram_mark_dirty(sram_);
-
-                    // Tell the daycare — updates totalXpGained and
-                    // totalLevelsGained without re-writing SRAM.
                     daycare_->recordBattleWin(0, xp, new_level);
 
                     printf_line("%s gained %u XP!",
@@ -404,6 +400,54 @@ void MatsuMonsterTerminal::pumpBattle()
                 }
             }
         }
+
+        // LORD progression on win.
+        if (won) {
+            if (battle_type_ == BattleType::GYM) {
+                lord_save_.gymProgress[battle_gym_idx_] = battle_trainer_ + 1;
+                if (battle_trainer_ + 1 >= LORD_GYM_TRAINERS) {
+                    lordOnGymCleared(lord_save_, battle_gym_idx_);
+                    const LordGym *g = lordGym(battle_gym_idx_);
+                    printf_line("*** You earned the %s Badge! ***",
+                                g ? g->badgeName : "???");
+                } else {
+                    const LordGym *g = lordGym(battle_gym_idx_);
+                    printf_line("Trainer defeated! (%u/%u in %s Gym)",
+                                (unsigned)(battle_trainer_ + 1),
+                                (unsigned)LORD_GYM_TRAINERS,
+                                g ? g->city : "?");
+                }
+                lordSaveAndReport();
+            } else if (battle_type_ == BattleType::E4) {
+                lord_save_.e4Progress = battle_gym_idx_ + 1;
+                const LordE4Member *m = lordE4Member(battle_gym_idx_);
+                printf_line("*** %s %s defeated! ***",
+                            m ? m->title : "???", m ? m->name : "???");
+
+                if (battle_gym_idx_ + 1 >= LORD_E4_COUNT) {
+                    lordOnE4Cleared(lord_save_);
+                    println("*** CHAMPION DEFEATED! League cleared! ***");
+                    if (lord_save_.ngPlusTier < 5) {
+                        lord_save_.ngPlusTier++;
+                        lordSetCurrentNgPlusTier(lord_save_.ngPlusTier);
+                        printf_line("NG+%u unlocked! Gyms and E4 are stronger now.",
+                                    (unsigned)lord_save_.ngPlusTier);
+                    }
+                } else {
+                    uint8_t next = battle_gym_idx_ + 1;
+                    const LordE4Member *nm = lordE4Member(next);
+                    if (nm) printf_line("Next: %s %s. Type `e4` to continue.",
+                                        nm->title, nm->name);
+                }
+                lordSaveAndReport();
+            }
+        } else if (battle_type_ == BattleType::E4) {
+            // Lost to E4 — reset progress back to Lorelei.
+            lord_save_.e4Progress = 0;
+            println("Blacked out... E4 progress reset to Lorelei.");
+            lordSaveAndReport();
+        }
+        battle_type_ = BattleType::WILD;  // reset for next battle
     }
     battle_was_active_ = battle_->isActive();
 }
@@ -590,6 +634,9 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "fight",  &args))  cmdFight(args);
     else if (starts_with(cmd, "run",    &args))  cmdRun();
     else if (starts_with(cmd, "catch",  &args))  cmdCatch();
+    else if (starts_with(cmd, "gym",   &args))  cmdGym(args);
+    else if (starts_with(cmd, "e4",    &args))  cmdE4();
+    else if (starts_with(cmd, "lord",  &args))  cmdLord();
     else if (starts_with(cmd, "lora_send",  &args)) cmdLoraSend(args);
     else if (starts_with(cmd, "lora_stats", &args)) cmdLoraStats();
     else if (starts_with(cmd, "lora_reinit", &args)) cmdLoraReinit();
@@ -621,8 +668,11 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  party         — list daycare party");
     println("  status        — daycare status + neighbor count");
     println("  fight <name>  — challenge a mesh neighbour by short name");
-    println("  run           — start a local roguelike battle vs CPU");
-    println("  catch         — try to catch the current wild Pokemon");
+    println("  run           - wild encounter (route based on badges)");
+    println("  catch         - try to catch the current wild Pokemon");
+    println("  gym           - list gyms / gym <N> to challenge gym N");
+    println("  e4            - challenge Elite Four (requires 8 badges)");
+    println("  lord          - show LORD save (badges, runs, NG+ tier)");
     println("  lora_send <s> — send raw probe (≥8 chars) on LongFast US");
     println("  lora_stats    — show LoRa init / TX / RX counters");
     println("  lora_reinit   — retry LoRa bring-up (handy after startup race)");
@@ -773,7 +823,8 @@ void MatsuMonsterTerminal::cmdFight(const char *args)
         snprintf((char *)myParty.nicknames[0], 11, "%s", speciesName(25));
     }
 
-    last_battle_line_[0] = '\0';    // fresh tracker for the new battle
+    battle_type_         = BattleType::WILD;  // PvP — no LORD progression
+    last_battle_line_[0] = '\0';
     battle_->startNetworkedAsInitiator(match->nodeId, myParty);
     printf_line("Challenging %s (0x%08x)...", match->shortName, (unsigned)match->nodeId);
 }
@@ -861,29 +912,40 @@ void MatsuMonsterTerminal::cmdRun()
         println("(No live save detected — using placeholder Pikachu.)");
     }
 
-    // CPU opponent: pick a random species from the early-game wild pool
-    // (port of upstream MonsterMesh's AREA_POOL_0). Level is the player's
-    // lead minus 3 so the fight is winnable for a Gen-1 starter team.
+    // CPU opponent: pick from LORD route based on badge count (falls back
+    // to the hardcoded kWildPool if LORD isn't loaded or route fails).
     Gen1Party cpuParty = {};
-    cpuParty.count = 1;
 
-    uint8_t cpuLevel = 3;
-    if (real_party && myParty.mons[0].level > 0) {
-        int target = (int)myParty.mons[0].level - 3;
-        // Add a small ±2 jitter so identical levels still produce some variety.
-        target += ((int)(esp_random() % 5) - 2);
-        if (target < 2)  target = 2;
-        if (target > 50) target = 50;
-        cpuLevel = (uint8_t)target;
+    ensureLordLoaded();
+    uint8_t bc = 0;
+    for (uint8_t i = 0; i < 8; ++i) if (lordHasBadge(lord_save_, i)) ++bc;
+    uint8_t routeIdx = bc < 8 ? bc : 7;
+    const LordRoute *route = lordRoute(routeIdx);
+
+    bool route_ok = lordPickWildEncounter(routeIdx, cpuParty);
+    if (route_ok) {
+        if (route) printf_line("[%s]", route->name);
+    } else {
+        // Fallback: original hardcoded pool.
+        cpuParty.count = 1;
+        uint8_t cpuLevel = 3;
+        if (real_party && myParty.mons[0].level > 0) {
+            int target = (int)myParty.mons[0].level - 3;
+            target += ((int)(esp_random() % 5) - 2);
+            if (target < 2)  target = 2;
+            if (target > 50) target = 50;
+            cpuLevel = (uint8_t)target;
+        }
+        uint8_t cpuSpecies = kWildPool[esp_random() % kWildPoolLen];
+        uint8_t cpuMoves[4];
+        pick_moves_for_species(cpuSpecies, cpuLevel, cpuMoves);
+        cpuParty.species[0] = cpuSpecies;
+        build_wild_mon(cpuParty.mons[0], cpuSpecies, cpuLevel, cpuMoves);
+        snprintf((char *)cpuParty.nicknames[0], 11, "%s", speciesName(cpuSpecies));
     }
 
-    uint8_t cpuSpecies = kWildPool[esp_random() % kWildPoolLen];
-    uint8_t cpuMoves[4];
-    pick_moves_for_species(cpuSpecies, cpuLevel, cpuMoves);
-
-    cpuParty.species[0] = cpuSpecies;
-    build_wild_mon(cpuParty.mons[0], cpuSpecies, cpuLevel, cpuMoves);
-    snprintf((char *)cpuParty.nicknames[0], 11, "%s", speciesName(cpuSpecies));
+    uint8_t cpuSpecies = cpuParty.species[0];
+    uint8_t cpuLevel   = cpuParty.mons[0].level;
 
     // Player placeholder fallback (no live save): give it a real nickname
     // so the engine's "[POKEMON] used X!" template doesn't render blank.
@@ -891,15 +953,13 @@ void MatsuMonsterTerminal::cmdRun()
         snprintf((char *)myParty.nicknames[0], 11, "%s", speciesName(25));
     }
 
+    battle_type_         = BattleType::WILD;
     last_battle_line_[0] = '\0';
     last_foe_species_    = cpuSpecies;
     last_foe_level_      = cpuLevel;
     xp_pending_          = true;
     battle_->startLocal(myParty, cpuParty);
 
-    // Announce the matchup BEFORE handing keys to the engine, so the user
-    // can see who they're up against without having to spend a turn first.
-    // Engine emits "A wild battle begins!" itself; we add the specifics.
     printf_line("A wild %s (L%u) appeared!",
                 speciesName(cpuSpecies), (unsigned)cpuLevel);
     const auto &lead = myParty.mons[0];
@@ -998,6 +1058,196 @@ void MatsuMonsterTerminal::cmdCatch()
     xp_pending_ = false;
     battle_->exit();
     dirty_ = true;
+}
+
+// ── LORD commands ───────────────────────────────────────────────────────────
+
+void MatsuMonsterTerminal::ensureLordLoaded()
+{
+    if (!lord_loaded_) {
+        lordLoad(lord_save_);
+        lordSetCurrentNgPlusTier(lord_save_.ngPlusTier);
+        lord_loaded_ = true;
+    }
+}
+
+void MatsuMonsterTerminal::lordSaveAndReport()
+{
+    if (lordSave(lord_save_)) {
+        // silent success
+    } else {
+        println("(warning: failed to save LORD progress)");
+    }
+}
+
+void MatsuMonsterTerminal::cmdLord()
+{
+    ensureLordLoaded();
+    printf_line("=== Legend of Charizard ===");
+
+    // Badge display
+    uint8_t bc = 0;
+    for (uint8_t i = 0; i < 8; ++i) if (lordHasBadge(lord_save_, i)) ++bc;
+    printf_line("Badges: %u/8", (unsigned)bc);
+
+    static const char *kBadgeNames[8] = {
+        "Boulder", "Cascade", "Thunder", "Rainbow",
+        "Soul", "Marsh", "Volcano", "Earth"
+    };
+    char badges_str[64] = {};
+    int pos = 0;
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (lordHasBadge(lord_save_, i)) {
+            if (pos > 0) pos += snprintf(badges_str + pos, sizeof(badges_str) - pos, ", ");
+            pos += snprintf(badges_str + pos, sizeof(badges_str) - pos, "%s", kBadgeNames[i]);
+        }
+    }
+    if (pos > 0) printf_line("  %s", badges_str);
+
+    if (lord_save_.leagueCleared)
+        printf_line("League: CLEARED (NG+%u)", (unsigned)lord_save_.ngPlusTier);
+    else
+        println("League: not yet cleared");
+
+    printf_line("Runs: %lu total, best %u waves",
+                (unsigned long)lord_save_.totalRuns,
+                (unsigned)lord_save_.bestRunWaves);
+}
+
+void MatsuMonsterTerminal::cmdGym(const char *args)
+{
+    if (!battle_) { println("(battle subsystem not wired)"); return; }
+    ensureLordLoaded();
+
+    // No argument: list gyms.
+    if (!args || !*args) {
+        static const char *kCities[8] = {
+            "Pewter", "Cerulean", "Vermilion", "Celadon",
+            "Fuchsia", "Saffron", "Cinnabar", "Viridian"
+        };
+        println("=== Kanto Gyms ===");
+        for (uint8_t i = 0; i < 8; ++i) {
+            const LordGym *g = lordGym(i);
+            bool unlocked = lordGymUnlocked(lord_save_, i);
+            bool cleared  = lordHasBadge(lord_save_, i);
+            const char *status = cleared ? "CLEARED" :
+                                 unlocked ? "unlocked" : "locked";
+            printf_line("  %u. %s (%s) - %s",
+                        (unsigned)(i + 1), kCities[i],
+                        g ? g->leaderName : "?", status);
+        }
+        println("Use: gym <N> to challenge (1-8)");
+        return;
+    }
+
+    int gymNum = atoi(args);
+    if (gymNum < 1 || gymNum > 8) {
+        println("Usage: gym <1-8>");
+        return;
+    }
+    uint8_t gymIdx = (uint8_t)(gymNum - 1);
+
+    if (!lordGymUnlocked(lord_save_, gymIdx)) {
+        println("That gym is locked - clear the previous gym first.");
+        return;
+    }
+
+    const LordGym *g = lordGym(gymIdx);
+    if (!g) { println("(bad gym data)"); return; }
+
+    // Determine next trainer to fight.
+    uint8_t trainerIdx = lord_save_.gymProgress[gymIdx];
+    if (trainerIdx >= LORD_GYM_TRAINERS) {
+        printf_line("%s Gym already cleared! You have the %s Badge.",
+                    g->city, g->badgeName);
+        return;
+    }
+
+    const LordGymTrainer &tr = g->trainers[trainerIdx];
+
+    // Build player party.
+    Gen1Party myParty;
+    if (!loadSavParty()) {
+        println("(No live save - load a Pokemon ROM first.)");
+        return;
+    }
+    myParty = sav_party_;
+
+    // Build gym trainer party.
+    Gen1Party cpuParty;
+    if (!lordBuildGymParty(gymIdx, trainerIdx, cpuParty)) {
+        println("(failed to build gym party)");
+        return;
+    }
+
+    if (trainerIdx == LORD_GYM_LEADER_INDEX) {
+        printf_line("=== %s Gym Leader %s! ===", g->city, g->leaderName);
+    } else {
+        printf_line("=== %s Gym: %s ===", g->city, tr.name);
+    }
+    printf_line("Trainer has %u Pokemon.", (unsigned)cpuParty.count);
+
+    battle_type_    = BattleType::GYM;
+    battle_gym_idx_ = gymIdx;
+    battle_trainer_ = trainerIdx;
+    last_foe_species_ = cpuParty.mons[0].species;
+    last_foe_level_   = cpuParty.mons[0].level;
+    xp_pending_       = true;
+    last_battle_line_[0] = '\0';
+    battle_->startLocal(myParty, cpuParty);
+    println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
+}
+
+void MatsuMonsterTerminal::cmdE4()
+{
+    if (!battle_) { println("(battle subsystem not wired)"); return; }
+    ensureLordLoaded();
+
+    // Require all 8 badges.
+    uint8_t bc = 0;
+    for (uint8_t i = 0; i < 8; ++i) if (lordHasBadge(lord_save_, i)) ++bc;
+    if (bc < 8) {
+        printf_line("You need all 8 badges to challenge the Elite Four. (%u/8)", bc);
+        return;
+    }
+
+    // Determine next E4 member.
+    uint8_t idx = lord_save_.e4Progress;
+    if (idx >= LORD_E4_COUNT) idx = 0;  // restart from Lorelei
+
+    const LordE4Member *m = lordE4Member(idx);
+    if (!m) { println("(bad E4 data)"); return; }
+
+    // Build player party.
+    Gen1Party myParty;
+    if (!loadSavParty()) {
+        println("(No live save - load a Pokemon ROM first.)");
+        return;
+    }
+    myParty = sav_party_;
+
+    // Build E4 party.
+    Gen1Party cpuParty;
+    if (!lordBuildE4Party(idx, cpuParty)) {
+        println("(failed to build E4 party)");
+        return;
+    }
+
+    printf_line("=== %s %s (%s type) ===", m->title, m->name, m->typeFlavor);
+    printf_line("They have %u Pokemon (L%u-%u).",
+                (unsigned)cpuParty.count,
+                (unsigned)cpuParty.mons[0].level,
+                (unsigned)cpuParty.mons[cpuParty.count - 1].level);
+
+    battle_type_    = BattleType::E4;
+    battle_gym_idx_ = idx;
+    battle_trainer_ = 0;
+    last_foe_species_ = cpuParty.mons[0].species;
+    last_foe_level_   = cpuParty.mons[0].level;
+    xp_pending_       = true;
+    last_battle_line_[0] = '\0';
+    battle_->startLocal(myParty, cpuParty);
+    println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
 }
 
 // ── Path #3 Session 1 smoke-test commands ──────────────────────────────────

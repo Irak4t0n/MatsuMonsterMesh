@@ -5,6 +5,7 @@
 
 #include "Gen1BattleEngine.h"
 #include "PokemonData.h"
+#include "DaycareData.h"         // daycareSpeciesNames[]
 #include "showdown_gen1_moves.h"
 
 #include <string.h>
@@ -361,8 +362,10 @@ static void writeMonToParty(Gen1Party &out, uint8_t slot,
         p.pp[i] = m ? m->pp : 0;
     }
     out.species[slot] = src.species;
-    snprintf((char *)out.nicknames[slot], 11, "%s", nick ? nick : "MON");
-    // OT name field intentionally left zero.
+    const char *name = (src.species > 0 && src.species < 152)
+                           ? daycareSpeciesNames[src.species] : "MON";
+    snprintf((char *)out.nicknames[slot], 11, "%s", name);
+    (void)nick;  // no longer used — species name is always better
 }
 
 bool lordBuildGymParty(uint8_t gymIdx, uint8_t trainerIdx, Gen1Party &out)

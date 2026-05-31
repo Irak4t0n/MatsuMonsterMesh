@@ -878,11 +878,15 @@ static esp_err_t send_data_frame_ch(uint8_t ch_idx, uint32_t to, uint32_t pkt_id
              ch_idx, ch->name, (unsigned long)to, (unsigned long)from,
              (unsigned long)pkt_id, ch->hash, (unsigned)total);
 
-    // MonsterMesh → MQTT only. All other channels → LoRa only.
-    if (ch->hash == MESHTASTIC_MM_CHANNEL_HASH && s_mqtt_tx_cb) {
-        s_mqtt_tx_cb(to, from, pkt_id, ch->hash, encrypted, data_len);
-        ESP_LOGI(TAG, "tx(ch%d) sent via MQTT", ch_idx);
-        return ESP_OK;
+    // MonsterMesh → MQTT only (no LoRa). All other channels → LoRa only.
+    if (ch->hash == MESHTASTIC_MM_CHANNEL_HASH) {
+        if (s_mqtt_tx_cb &&
+            s_mqtt_tx_cb(to, from, pkt_id, ch->hash, encrypted, data_len)) {
+            ESP_LOGI(TAG, "tx(ch%d) sent via MQTT", ch_idx);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "tx(ch%d) MQTT unavailable, dropping packet", ch_idx);
+        return ESP_ERR_NOT_FOUND;
     }
     return meshtastic_lora_send_raw(pkt, total);
 }
@@ -929,15 +933,15 @@ static esp_err_t send_data_frame_mm(uint32_t to, uint32_t pkt_id,
              (unsigned long)to, (unsigned long)from, (unsigned long)pkt_id,
              MESHTASTIC_MM_CHANNEL_HASH, (unsigned)total);
 
-    // MonsterMesh channel: MQTT only (LoRa fallback to be added later).
-    if (s_mqtt_tx_cb) {
+    // MonsterMesh channel: MQTT only (no LoRa fallback).
+    if (s_mqtt_tx_cb &&
         s_mqtt_tx_cb(to, from, pkt_id, MESHTASTIC_MM_CHANNEL_HASH,
-                     encrypted, data_len);
+                     encrypted, data_len)) {
         ESP_LOGI(TAG, "tx(mm) sent via MQTT");
         return ESP_OK;
     }
-    // Fallback to LoRa if MQTT callback not registered
-    return meshtastic_lora_send_raw(pkt, total);
+    ESP_LOGW(TAG, "tx(mm) MQTT unavailable, dropping packet");
+    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t meshtastic_send_text(const char *text)

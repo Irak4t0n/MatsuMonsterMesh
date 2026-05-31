@@ -80,7 +80,10 @@ in the badge-bsp managed component for the full pin map.
 - Daycare: party check-in/out, hourly events, friendship/rivalry,
   achievements, XP write-back to the running ROM's SRAM — wired to
   the live LoRa radio with auto-beacon on ROM load
-- LORD save / Kanto gym roster data (compiled in, gameplay loop pending)
+- **Legend of Charizard (LORD)**: full single-player campaign — 8 Kanto
+  gyms (4 grunts + leader each), Elite Four + Champion, badge-gated wild
+  encounter routes, NG+ difficulty tiers (1-5), persistent save to SD.
+  Terminal commands: `gym`, `e4`, `lord`, `run` (route-based wilds)
 - BattleLink wire protocol over Meshtastic PRIVATE_APP portnum
 - Fullscreen terminal UI rendered on top of the emulator (Fn+T to toggle),
   fully pax-free rendering via direct-to-framebuffer glyph cache — header,

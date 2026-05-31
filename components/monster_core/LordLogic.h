@@ -44,3 +44,23 @@ bool lordHasBadge(const LordSave &s, uint8_t gymIdx);
 // Gym unlocked for challenge? Linear: gym 0 always; gym N requires badges
 // 0..N-1. (Gym-cleared gyms also remain visitable.)
 bool lordGymUnlocked(const LordSave &s, uint8_t gymIdx);
+
+// NG+ level scaling. Tier 0 = base game (return baseLevel unchanged).
+// Tier 1..5 forces every gym leader's pokemon to a uniform level
+// (60/70/80/90/100), and the E4 + Champion to that level + 10 (cap 100).
+// Returns max(baseLevel, scaledLevel) so a base-game leader at lvl 65 isn't
+// scaled DOWN at NG+1 when the table says 60.
+uint8_t lordScaleLevel(uint8_t baseLevel, uint8_t ngPlusTier, bool isE4);
+
+// Globally accessible NG+ tier — set by terminal at lord-load time so the
+// LordGyms / LordE4 builders can pick it up without threading a parameter
+// through the gym-fight callback chain.
+void    lordSetCurrentNgPlusTier(uint8_t tier);
+uint8_t lordCurrentNgPlusTier();
+
+// NG+ coverage moves: gym/E4 leaders get level-appropriate STAB / coverage
+// moves at higher tiers. Tier 0 = no change (orig moves stay).
+void lordApplyNgPlusMoves(uint8_t dex, uint8_t tier, uint8_t moves[4]);
+
+// E4 / Champion progression.
+void lordOnE4Cleared(LordSave &s);

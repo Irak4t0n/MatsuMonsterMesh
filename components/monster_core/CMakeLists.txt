@@ -16,6 +16,8 @@ idf_component_register(
         "Gen1BattleEngine.cpp"
         "MonsterMeshTextBattle.cpp"
         "LordGyms.cpp"
+        "LordE4.cpp"
+        "LordRoutes.cpp"
         "LordLogic.cpp"
         "LordSave.cpp"
     INCLUDE_DIRS

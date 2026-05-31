@@ -23,6 +23,7 @@ enum LordNewsType : uint8_t {
     LORD_NEWS_BEST_RUN  = 2,   // arg2 = waves
     LORD_NEWS_CENTURY   = 3,   // arg2 = milestone (100 runs, etc.)
     LORD_NEWS_RUN_ENDED = 4,   // arg2 = waves beaten this run
+    LORD_NEWS_E4_CLEARED = 5,  // champion defeated — league cleared
 };
 
 #pragma pack(push, 1)
@@ -60,7 +61,10 @@ struct LordSave {
     uint16_t _pad3;
     LordNewsEntry news[LORD_NEWS_CAP];      // 96 bytes
 
-    uint8_t  reserved[128];                 // forward-compat (PvP, trainer level)
+    uint8_t  leagueCleared;                 // 1 = champion defeated, enables NG+
+    uint8_t  ngPlusTier;                    // 0 = base game, 1..5 = NG+ tier
+    uint8_t  e4Progress;                    // E4 member index 0..4 (5 = all cleared this run)
+    uint8_t  reserved[125];                 // forward-compat (PvP, trainer level)
 };
 #pragma pack(pop)
 

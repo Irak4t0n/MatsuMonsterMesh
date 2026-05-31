@@ -352,12 +352,10 @@ void meshtastic_proto_set_private_cb(meshtastic_private_cb_t cb);
 
 // ── MQTT TX hook (Session 11) ────────────────────────────────────────
 //
-// Optional callback invoked by send_data_frame_mm() after encrypting the
-// payload. The MQTT transport registers this to publish a ServiceEnvelope
-// to the broker in parallel with the LoRa TX. The encrypted bytes and
-// header fields are passed so the callback can build the protobuf without
-// re-encrypting.
-typedef void (*meshtastic_mqtt_tx_cb_t)(uint32_t to, uint32_t from,
+// Optional callback invoked by send_data_frame / send_data_frame_mm after
+// encrypting the payload. Returns true if the message was published via
+// MQTT (caller skips LoRa TX). Returns false to fall back to LoRa.
+typedef bool (*meshtastic_mqtt_tx_cb_t)(uint32_t to, uint32_t from,
                                          uint32_t pkt_id, uint8_t channel_hash,
                                          const uint8_t *encrypted, size_t enc_len);
 void meshtastic_proto_set_mqtt_tx_cb(meshtastic_mqtt_tx_cb_t cb);
