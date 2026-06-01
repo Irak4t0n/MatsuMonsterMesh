@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// MatsuMonsterTerminal — fullscreen text terminal.
+// MatsuMonsterTerminal - fullscreen text terminal.
 //
 // Render target: pax_buf_t already initialised by main.c (uses pax-gfx with
 // orientation = PAX_O_ROT_CW so logical coords match the portrait viewport).
@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-// BSP headers are plain C with no `extern "C"` guards of their own — wrap
+// BSP headers are plain C with no `extern "C"` guards of their own - wrap
 // here so bsp_display_blit() etc. link to their C definitions. PAX headers
 // (below) are C++-aware and must NOT be wrapped (they pull in <initializer_list>).
 extern "C" {
@@ -29,7 +29,7 @@ extern "C" {
 #include "bsp/display.h"
 #include "bsp/input.h"
 
-// Defined in main/main.c — Alt+M from the terminal forwards here so the
+// Defined in main/main.c - Alt+M from the terminal forwards here so the
 // user can swap to the Meshtastic UI app without first leaving the
 // terminal. main.c's reboot helper sets the AppFS bootsel and resets.
 bool restart_to_meshtastic(void);
@@ -81,14 +81,14 @@ static inline uint32_t now_ms() {
     return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
-// Forward decl — defined later in the file, used by cmdFight/cmdRun.
+// Forward decl - defined later in the file, used by cmdFight/cmdRun.
 static void fill_placeholder_mon(Gen1Pokemon &m,
                                  uint8_t species, uint8_t level,
                                  uint8_t move_id, uint8_t move_pp);
 
 // ── Wild encounter pool ────────────────────────────────────────────────────
 // Common Gen 1 wilds from the Viridian / Pallet / Route 1 / Viridian Forest
-// area — direct port of upstream MonsterMesh's AREA_POOL_0
+// area - direct port of upstream MonsterMesh's AREA_POOL_0
 // (_refs_monster_mesh/.../MonsterMeshTerminal.cpp:24). Keeps the "early-game
 // roguelike" feel for `run` without a full progression system yet.
 static const uint8_t kWildPool[] = {
@@ -110,7 +110,7 @@ static constexpr size_t kWildPoolLen = sizeof(kWildPool) / sizeof(kWildPool[0]);
 // if nothing else fits. Matches MonsterMeshTerminal.cpp:1011 behaviour.
 //
 // Level-clamped ceiling: a L3 wild shouldn't roll Razor Leaf (55, high-crit)
-// or Slam (80) — that's how Paras one-shots a same-level lead. Cap is
+// or Slam (80) - that's how Paras one-shots a same-level lead. Cap is
 // `min(100, 30 + level*7)`:
 //   L3 → 51   (Tackle/Scratch/Pound/Mega Drain qualify; Razor Leaf doesn't)
 //   L5 → 65   (Razor Leaf in)
@@ -130,7 +130,7 @@ static void pick_moves_for_species(uint8_t species, uint8_t level,
     if (ceil_i > 100) ceil_i = 100;
     uint8_t pmax = (uint8_t)ceil_i;
 
-    // STAB moves first — same min as upstream so STAB still beats filler.
+    // STAB moves first - same min as upstream so STAB still beats filler.
     uint8_t stab_min = 40;
     if (stab_min > pmax) stab_min = pmax;   // tiny levels: relax floor
     for (uint16_t i = 0; i < GEN1_MOVE_COUNT && picked < 4; ++i) {
@@ -230,7 +230,7 @@ void MatsuMonsterTerminal::prepareForReentry()
 {
     // Cancel any battle the user left mid-fight before exiting via Fn+T.
     // Without this, battle_->isActive() stays true on re-entry and the
-    // engine intercepts every keystroke at the `>` prompt — typing letters
+    // engine intercepts every keystroke at the `>` prompt - typing letters
     // does nothing because the engine only handles 1-4/s/f/ESC.
     if (battle_ && battle_->isActive()) {
         battle_->exit();
@@ -325,7 +325,7 @@ void MatsuMonsterTerminal::handleInput()
     // the terminal scrollback so the user can read turn-by-turn output.
     pumpBattle();
 
-    // Cursor blink — toggle every 500ms. Only the input line needs to
+    // Cursor blink - toggle every 500ms. Only the input line needs to
     // redraw, NOT the whole scrollback / header.
     uint32_t t = now_ms();
     if (t - blink_ms_ >= 500) {
@@ -341,11 +341,11 @@ void MatsuMonsterTerminal::pumpBattle()
     // Drive the battle's per-frame state (CPU action submission in LOCAL
     // mode, retry timers in NETWORKED mode, scroll throttle decrement).
     // Log output now arrives via the ExternalLogCallback registered in the
-    // ctor — no polling needed here.
+    // ctor - no polling needed here.
     if (battle_->isActive()) {
         battle_->tick(now_ms());
         if (battle_->dirty()) {
-            panel_dirty_ = true;  // HP/moves changed — redraw battle panel
+            panel_dirty_ = true;  // HP/moves changed - redraw battle panel
             battle_->clearDirty();
         }
     }
@@ -442,7 +442,7 @@ void MatsuMonsterTerminal::pumpBattle()
                 lordSaveAndReport();
             }
         } else if (battle_type_ == BattleType::E4) {
-            // Lost to E4 — reset progress back to Lorelei.
+            // Lost to E4 - reset progress back to Lorelei.
             lord_save_.e4Progress = 0;
             println("Blacked out... E4 progress reset to Lorelei.");
             lordSaveAndReport();
@@ -467,7 +467,7 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
         return;
     }
     // Alt+M → reboot into the Tanmatsu Meshtastic UI app. Same shortcut
-    // main.c registers for the emulator state — duplicated here so the
+    // main.c registers for the emulator state - duplicated here so the
     // user can swap apps without first leaving the terminal.
     if ((modifiers & BSP_INPUT_MODIFIER_ALT) &&
         (ascii == 'm' || ascii == 'M')) {
@@ -478,7 +478,7 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
         return;
     }
 
-    // Battle just ended (Phase::FINISHED) — any keystroke dismisses the
+    // Battle just ended (Phase::FINISHED) - any keystroke dismisses the
     // result screen. Do that here AND fall through so the same keystroke
     // also reaches the terminal-input path. Otherwise the user loses the
     // first character of the command they're trying to type next.
@@ -526,7 +526,7 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
     // fires *both* a NAVIGATION event (key=BACKSPACE) and a KEYBOARD event
     // (ascii='\b') for a single physical press. submitInput / wants_exit_
     // are idempotent so Enter/ESC double-firing is invisible, but
-    // backspaceInput is destructive — handling both paths deletes two
+    // backspaceInput is destructive - handling both paths deletes two
     // characters per press. Navigation path owns backspace.
     if (ascii == 27 /* ESC */)          { wants_exit_ = true; return; }
 
@@ -578,7 +578,7 @@ void MatsuMonsterTerminal::appendInputChar(char c)
     if (input_len_ < INPUT_MAX - 1) {
         input_buf_[input_len_++] = c;
         input_buf_[input_len_]   = '\0';
-        // Only the bottom input line needs to redraw — keep the scrollback
+        // Only the bottom input line needs to redraw - keep the scrollback
         // pixels intact. Avoids a full pax_background + 30 text calls per
         // keystroke, which is what makes typing feel sluggish.
         input_only_dirty_ = true;
@@ -603,7 +603,7 @@ void MatsuMonsterTerminal::submitInput()
     input_len_ = 0;
     input_buf_[0] = '\0';
     handleCommand(cmdcopy);
-    // Commands may start/end battles or change party state — refresh panel.
+    // Commands may start/end battles or change party state - refresh panel.
     panel_dirty_ = true;
     refreshPanelParty();
 }
@@ -629,33 +629,39 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     if (*cmd == '\0') return;
 
     const char *args = nullptr;
+    // Game commands
     if      (starts_with(cmd, "party",  &args))  cmdParty();
-    else if (starts_with(cmd, "status", &args))  cmdStatus();
-    else if (starts_with(cmd, "fight",  &args))  cmdFight(args);
+    else if (starts_with(cmd, "status", &args) || starts_with(cmd, "st", &args))  cmdStatus();
+    else if (starts_with(cmd, "fight",  &args) || starts_with(cmd, "f",  &args))  cmdFight(args);
     else if (starts_with(cmd, "run",    &args))  cmdRun();
     else if (starts_with(cmd, "catch",  &args))  cmdCatch();
     else if (starts_with(cmd, "gym",   &args))  cmdGym(args);
     else if (starts_with(cmd, "e4",    &args))  cmdE4();
     else if (starts_with(cmd, "lord",  &args))  cmdLord();
-    else if (starts_with(cmd, "lora_send",  &args)) cmdLoraSend(args);
-    else if (starts_with(cmd, "lora_stats", &args)) cmdLoraStats();
-    else if (starts_with(cmd, "lora_reinit", &args)) cmdLoraReinit();
-    else if (starts_with(cmd, "lora_probe", &args)) cmdLoraProbe();
-    else if (starts_with(cmd, "mesh_recent", &args)) cmdMeshRecent();
-    else if (starts_with(cmd, "mesh_messages", &args)) cmdMeshMessages();
-    else if (starts_with(cmd, "mesh_send", &args)) cmdMeshSend(args);
-    else if (starts_with(cmd, "mesh_announce", &args)) cmdMeshAnnounce(args);
-    else if (starts_with(cmd, "mesh_nodes", &args)) cmdMeshNodes();
-    else if (starts_with(cmd, "daycare_beacon", &args)) cmdDaycareBeacon();
-    else if (starts_with(cmd, "lora_tx_test", &args)) cmdLoraTxTest(args);
-    else if (starts_with(cmd, "mqtt_status", &args)) cmdMqttStatus();
-    else if (starts_with(cmd, "ch_list", &args))    cmdChList();
-    else if (starts_with(cmd, "ch_add",  &args))    cmdChAdd(args);
-    else if (starts_with(cmd, "ch_del",  &args))    cmdChDel(args);
-    else if (starts_with(cmd, "ch_set",  &args))    cmdChSet(args);
-    else if (starts_with(cmd, "ch_reset", &args))   cmdChReset();
+    // LoRa commands (short: ls, lr, li, lp, lt)
+    else if (starts_with(cmd, "lora_send",  &args) || starts_with(cmd, "ls", &args)) cmdLoraSend(args);
+    else if (starts_with(cmd, "lora_stats", &args) || starts_with(cmd, "lr", &args)) cmdLoraStats();
+    else if (starts_with(cmd, "lora_reinit", &args) || starts_with(cmd, "li", &args)) cmdLoraReinit();
+    else if (starts_with(cmd, "lora_probe", &args) || starts_with(cmd, "lp", &args)) cmdLoraProbe();
+    else if (starts_with(cmd, "lora_tx_test", &args) || starts_with(cmd, "lt", &args)) cmdLoraTxTest(args);
+    // Mesh commands (short: mr, mm, ms, ma, mn)
+    else if (starts_with(cmd, "mesh_recent", &args) || starts_with(cmd, "mr", &args)) cmdMeshRecent();
+    else if (starts_with(cmd, "mesh_messages", &args) || starts_with(cmd, "mm", &args)) cmdMeshMessages();
+    else if (starts_with(cmd, "mesh_send", &args) || starts_with(cmd, "ms", &args)) cmdMeshSend(args);
+    else if (starts_with(cmd, "mesh_announce", &args) || starts_with(cmd, "ma", &args)) cmdMeshAnnounce(args);
+    else if (starts_with(cmd, "mesh_nodes", &args) || starts_with(cmd, "mn", &args)) cmdMeshNodes();
+    // Daycare / MQTT (short: db, mq)
+    else if (starts_with(cmd, "daycare_beacon", &args) || starts_with(cmd, "db", &args)) cmdDaycareBeacon();
+    else if (starts_with(cmd, "mqtt_status", &args) || starts_with(cmd, "mq", &args)) cmdMqttStatus();
+    // Channel commands (short: cl, ca, cd, cs, cr)
+    else if (starts_with(cmd, "ch_list", &args) || starts_with(cmd, "cl", &args))    cmdChList();
+    else if (starts_with(cmd, "ch_add",  &args) || starts_with(cmd, "ca", &args))    cmdChAdd(args);
+    else if (starts_with(cmd, "ch_del",  &args) || starts_with(cmd, "cd", &args))    cmdChDel(args);
+    else if (starts_with(cmd, "ch_set",  &args) || starts_with(cmd, "cs", &args))    cmdChSet(args);
+    else if (starts_with(cmd, "ch_reset", &args) || starts_with(cmd, "cr", &args))   cmdChReset();
+    // Misc
     else if (starts_with(cmd, "clear",  &args))  cmdClear();
-    else if (starts_with(cmd, "quit",   &args))  cmdQuit();
+    else if (starts_with(cmd, "quit",   &args) || starts_with(cmd, "q", &args))  cmdQuit();
     else if (starts_with(cmd, "exit",   &args))  cmdQuit();
     else if (starts_with(cmd, "help",   &args))  cmdHelp();
     else if (starts_with(cmd, "?",      &args))  cmdHelp();
@@ -665,40 +671,45 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
 void MatsuMonsterTerminal::cmdHelp()
 {
     println("Commands:");
-    println("  party         — list daycare party");
-    println("  status        — daycare status + neighbor count");
-    println("  fight <name>  — challenge a mesh neighbour by short name");
-    println("  run           - wild encounter (route based on badges)");
-    println("  catch         - try to catch the current wild Pokemon");
-    println("  gym           - list gyms / gym <N> to challenge gym N");
-    println("  e4            - challenge Elite Four (requires 8 badges)");
-    println("  lord          - show LORD save (badges, runs, NG+ tier)");
-    println("  lora_send <s> — send raw probe (≥8 chars) on LongFast US");
-    println("  lora_stats    — show LoRa init / TX / RX counters");
-    println("  lora_reinit   — retry LoRa bring-up (handy after startup race)");
-    println("  lora_probe    — exercise each LoRa primitive to find a bad one");
-    println("  mesh_recent   — last N parsed Meshtastic headers + decoded body");
-    println("  mesh_messages — text messages only, newest first");
-    println("  mesh_send <t> — broadcast text message <t> on LongFast");
-    println("  mesh_announce — broadcast NodeInfo (so T-Deck shows our name)");
-    println("  mesh_nodes    — list nodes we've heard NodeInfo from");
-    println("  daycare_beacon— force an immediate daycare beacon broadcast");
-    println("  lora_tx_test N— send N-byte dummy packet (find TX size limit)");
-    println("  mqtt_status   — show MQTT/WiFi connection state");
-    println("  ch_list       — list configured channels");
-    println("  ch_add <n> <k>— add channel (name + hex PSK or 'default')");
-    println("  ch_del <N>    — remove channel N (1-8)");
-    println("  ch_set <N>    — set active TX channel (1-8)");
-    println("  ch_reset      — restore default channels (LongFast + MonsterMesh)");
-    println("  clear         — clear scrollback");
-    println("  quit          — back to emulator");
+    println(" -- Game --");
+    println("  party       - list daycare party");
+    println("  st          - daycare status + neighbors");
+    println("  f <name>    - mirror match vs neighbor");
+    println("  run         - wild encounter (badge route)");
+    println("  catch       - catch current wild Pokemon");
+    println("  gym [N]     - list/challenge gym N");
+    println("  e4          - challenge Elite Four");
+    println("  lord        - LORD save summary");
+    println(" -- LoRa --");
+    println("  ls <text>   - send raw probe on LongFast");
+    println("  lr          - LoRa init/TX/RX counters");
+    println("  li          - retry LoRa bring-up");
+    println("  lp          - exercise LoRa primitives");
+    println("  lt <N>      - send N-byte test packet");
+    println(" -- Mesh --");
+    println("  mr          - recent Meshtastic packets");
+    println("  mm          - text messages only");
+    println("  ms <text>   - broadcast text on LongFast");
+    println("  ma          - broadcast NodeInfo");
+    println("  mn          - list known nodes");
+    println("  db          - force daycare beacon TX");
+    println("  mq          - MQTT/WiFi status");
+    println(" -- Channels --");
+    println("  cl          - list channels");
+    println("  ca <n> <k>  - add channel (name + PSK)");
+    println("  cd <N>      - remove channel N");
+    println("  cs <N>      - set active TX channel");
+    println("  cr          - reset to defaults");
+    println(" --");
+    println("  clear       - clear scrollback");
+    println("  q           - back to emulator");
 }
 
 void MatsuMonsterTerminal::cmdParty()
 {
     const uint8_t *wram = gnuboy_wram_bank1();
     if (!wram) {
-        println("(emulator WRAM not available — load a ROM first)");
+        println("(emulator WRAM not available - load a ROM first)");
         return;
     }
 
@@ -747,9 +758,9 @@ void MatsuMonsterTerminal::cmdStatus()
     for (uint8_t i = 0; i < nbrCnt; ++i) {
         const char *lead = (nbrs[i].partyCount > 0 && nbrs[i].party[0].species > 0)
                                ? speciesName(nbrs[i].party[0].species) : "?";
-        printf_line("  [%s] %s — %s lv%u (%u mon)",
+        printf_line("  [%s] %s - %s lv%u (%u mon)",
                     nbrs[i].shortName,
-                    nbrs[i].gameName[0] ? nbrs[i].gameName : "???",
+                    nbrs[i].gameName[0] ? nbrs[i].gameName : "(no name)",
                     lead,
                     (unsigned)(nbrs[i].partyCount > 0 ? nbrs[i].party[0].level : 0),
                     (unsigned)nbrs[i].partyCount);
@@ -757,7 +768,7 @@ void MatsuMonsterTerminal::cmdStatus()
     printf_line("Achievements: 0x%016llx",
                 (unsigned long long)state.achievementFlags);
 
-    // Per-Pokémon session counters — updated by cmdRun's XP payout +
+    // Per-Pokémon session counters - updated by cmdRun's XP payout +
     // (eventually) daycare events. Skip slots that haven't earned anything
     // so the status line stays readable.
     for (uint8_t i = 0; i < state.partyCount; ++i) {
@@ -779,7 +790,7 @@ void MatsuMonsterTerminal::cmdStatus()
 
 void MatsuMonsterTerminal::cmdFight(const char *args)
 {
-    if (!battle_ || !radio_ || !daycare_) {
+    if (!battle_ || !daycare_) {
         println("(battle subsystem not wired)");
         return;
     }
@@ -788,10 +799,8 @@ void MatsuMonsterTerminal::cmdFight(const char *args)
         return;
     }
 
-    // Stub-radio path: getNeighborCount() returns 0 → user feedback per spec.
-    if (radio_->getNeighborCount() == 0 && daycare_->getNeighborCount() == 0) {
-        println("No mesh neighbors. (Radio is in stub mode — see");
-        println("CONFIG_MATSUMONSTER_MESH_STUB in menuconfig.)");
+    if (daycare_->getNeighborCount() == 0) {
+        println("No mesh neighbors yet - wait for beacons.");
         return;
     }
 
@@ -806,27 +815,55 @@ void MatsuMonsterTerminal::cmdFight(const char *args)
     }
     if (!match) {
         printf_line("No neighbour named '%s'.", args);
+        println("Try `status` to see who's nearby.");
         return;
     }
 
-    // Player party from the live save when available; falls back to
-    // placeholder Pikachu only if the ROM has no Gen 1 SAV.
-    Gen1Party myParty;
-    if (loadSavParty()) {
-        myParty = sav_party_;
-    } else {
-        myParty = {};
-        myParty.count       = 1;
-        myParty.species[0]  = 25;
-        fill_placeholder_mon(myParty.mons[0], 25, 5, 33, 35);
-        // Non-empty nickname so the engine's [POKEMON] templates render.
-        snprintf((char *)myParty.nicknames[0], 11, "%s", speciesName(25));
+    if (match->partyCount == 0) {
+        printf_line("%s has no party data yet.", match->shortName);
+        return;
     }
 
-    battle_type_         = BattleType::WILD;  // PvP — no LORD progression
+    // Player party from the live save.
+    Gen1Party myParty;
+    if (!loadSavParty()) {
+        println("(No live save - load a Pokemon ROM first.)");
+        return;
+    }
+    myParty = sav_party_;
+
+    // Build opponent party from the neighbor's beacon data.
+    Gen1Party cpuParty = {};
+    uint8_t n = match->partyCount > 6 ? 6 : match->partyCount;
+    cpuParty.count = n;
+    for (uint8_t i = 0; i < n; ++i) {
+        const auto &src = match->party[i];
+        if (src.species == 0) { cpuParty.count = i; break; }
+        build_wild_mon(cpuParty.mons[i], src.species, src.level, src.moves);
+        cpuParty.species[i] = src.species;
+        const char *nick = src.nickname[0] ? src.nickname : speciesName(src.species);
+        snprintf((char *)cpuParty.nicknames[i], 11, "%s", nick);
+    }
+
+    if (cpuParty.count == 0) {
+        printf_line("%s has no valid Pokemon.", match->shortName);
+        return;
+    }
+
+    const char *trainerName = match->gameName[0] ? match->gameName : match->shortName;
+    printf_line("=== Mirror Match vs %s ===", trainerName);
+    printf_line("They have %u Pokemon, led by %s (L%u).",
+                (unsigned)cpuParty.count,
+                speciesName(cpuParty.species[0]),
+                (unsigned)cpuParty.mons[0].level);
+
+    battle_type_         = BattleType::WILD;  // no LORD progression
     last_battle_line_[0] = '\0';
-    battle_->startNetworkedAsInitiator(match->nodeId, myParty);
-    printf_line("Challenging %s (0x%08x)...", match->shortName, (unsigned)match->nodeId);
+    last_foe_species_    = cpuParty.species[0];
+    last_foe_level_      = cpuParty.mons[0].level;
+    xp_pending_          = true;
+    battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
+    println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
 }
 
 // Re-read the live Gen1Party from the bound IEmulatorSRAM each call.
@@ -909,7 +946,7 @@ void MatsuMonsterTerminal::cmdRun()
         myParty.count       = 1;
         myParty.species[0]  = 25;
         fill_placeholder_mon(myParty.mons[0], 25, 5, 33, 35);
-        println("(No live save detected — using placeholder Pikachu.)");
+        println("(No live save detected - using placeholder Pikachu.)");
     }
 
     // CPU opponent: pick from LORD route based on badge count (falls back
@@ -973,7 +1010,7 @@ void MatsuMonsterTerminal::cmdRun()
 void MatsuMonsterTerminal::cmdCatch()
 {
     if (!battle_ || !battle_->isActive()) {
-        println("No wild Pokemon to catch — try `run` first.");
+        println("No wild Pokemon to catch - try `run` first.");
         return;
     }
     if (battle_->mode() != MonsterMeshTextBattle::Mode::LOCAL_ROGUELIKE) {
@@ -981,12 +1018,12 @@ void MatsuMonsterTerminal::cmdCatch()
         return;
     }
     if (!sram_) {
-        println("(catch: no SRAM bound — can't write to save)");
+        println("(catch: no SRAM bound - can't write to save)");
         return;
     }
 
     // ── Catch chance ──────────────────────────────────────────────────
-    // Hand-tuned for the roguelike pacing — Gen 1's actual formula uses
+    // Hand-tuned for the roguelike pacing - Gen 1's actual formula uses
     // ball type, status, and a divisor that's brutal at full HP. Ours:
     //   base 30% + 1% per missing HP%, +25% if foe is statused, capped 95%.
     // Quick reference at L5 vs full-HP foe → 30%; at 1HP → 95%.
@@ -1028,7 +1065,7 @@ void MatsuMonsterTerminal::cmdCatch()
     cm.type2  = foe.type2;
     memcpy(cm.moves, foe.moves, 4);
     memcpy(cm.pp,    foe.pp,    4);
-    // BattlePoke doesn't track DVs after init — re-use the same default
+    // BattlePoke doesn't track DVs after init - re-use the same default
     // build_wild_mon writes (0x88/0x88, the upstream wild-encounter pair).
     cm.dvs[0] = 0x88;
     cm.dvs[1] = 0x88;
@@ -1052,7 +1089,7 @@ void MatsuMonsterTerminal::cmdCatch()
     uint8_t *buf = iemu_sram_data(sram_);
     if (buf) DaycareSavPatcher::fixChecksum(buf);
 
-    // No XP for caught mons (matches Gen 1 R/B — defeating gives XP, not
+    // No XP for caught mons (matches Gen 1 R/B - defeating gives XP, not
     // catching). Clear the pending-XP edge so pumpBattle's just_finished
     // branch doesn't try to also pay out for this fight.
     xp_pending_ = false;
@@ -1194,7 +1231,7 @@ void MatsuMonsterTerminal::cmdGym(const char *args)
     last_foe_level_   = cpuParty.mons[0].level;
     xp_pending_       = true;
     last_battle_line_[0] = '\0';
-    battle_->startLocal(myParty, cpuParty);
+    battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
 }
 
@@ -1246,7 +1283,7 @@ void MatsuMonsterTerminal::cmdE4()
     last_foe_level_   = cpuParty.mons[0].level;
     xp_pending_       = true;
     last_battle_line_[0] = '\0';
-    battle_->startLocal(myParty, cpuParty);
+    battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
 }
 
@@ -1254,19 +1291,19 @@ void MatsuMonsterTerminal::cmdE4()
 //
 // `lora_send <text>` ships a raw byte payload over the air on LongFast US
 // 907.125 MHz. Other Meshtastic devices on the same channel will RECEIVE
-// it at the wire level — they won't decode it as a Meshtastic packet (we
+// it at the wire level - they won't decode it as a Meshtastic packet (we
 // don't have the protocol layer yet), but they may log "rx packet of N
 // bytes, decode failed" or similar, which is enough to prove the link.
 //
 // `lora_stats` prints counters: configs applied, TX attempted/ok/err,
 // RX packets/bytes. RX should increment whenever ANY other Meshtastic
-// device on LongFast US is transmitting nearby — useful for confirming
+// device on LongFast US is transmitting nearby - useful for confirming
 // the radio is actually listening to live mesh traffic.
 
 void MatsuMonsterTerminal::cmdLoraSend(const char *args)
 {
     if (!meshtastic_lora_is_up()) {
-        println("(lora_send: radio not up — meshtastic_lora_begin failed)");
+        println("(lora_send: radio not up - meshtastic_lora_begin failed)");
         return;
     }
     if (!args || !*args) {
@@ -1344,11 +1381,11 @@ void MatsuMonsterTerminal::cmdLoraProbe()
         printf_line("  BW      %u kHz", (unsigned)r.cur_bw);
         printf_line("  CR      4/%u",   (unsigned)r.cur_cr);
     } else {
-        println("(C6 didn't return a valid config — get_config failed)");
+        println("(C6 didn't return a valid config - get_config failed)");
     }
 }
 
-// ── Path #3 Session 2a — Meshtastic protocol view ───────────────────────────
+// ── Path #3 Session 2a - Meshtastic protocol view ───────────────────────────
 //
 // `mesh_recent` shows the most recent parsed packets. Each row is one
 // Meshtastic on-air packet broken down by 16-byte header fields. The
@@ -1379,7 +1416,7 @@ void MatsuMonsterTerminal::cmdMeshRecent()
     printf_line("-- mesh_recent (parsed %u total) --",
                 (unsigned)meshtastic_proto_total_parsed());
     if (n == 0) {
-        println("(no packets yet — wait for T-Deck Plus to broadcast)");
+        println("(no packets yet - wait for T-Deck Plus to broadcast)");
         return;
     }
     uint32_t now_ms_v = (uint32_t)(esp_timer_get_time() / 1000ULL);
@@ -1391,7 +1428,7 @@ void MatsuMonsterTerminal::cmdMeshRecent()
                              ? (size_t)e.raw_len - MESHTASTIC_HEADER_LEN : 0;
 
         // Portnum / decrypt summary, same logic as before.
-        char portcol[24] = "—";
+        char portcol[24] = "-";
         if (e.decrypted) {
             if (e.portnum_guess >= 0) {
                 const char *lbl = portnum_label(e.portnum_guess);
@@ -1475,7 +1512,7 @@ void MatsuMonsterTerminal::cmdMeshNodes()
     println("(* = us)");
 }
 
-// ── Path #3 Session 2d — Meshtastic TX commands ─────────────────────────────
+// ── Path #3 Session 2d - Meshtastic TX commands ─────────────────────────────
 
 void MatsuMonsterTerminal::cmdMeshSend(const char *args)
 {
@@ -1506,7 +1543,7 @@ void MatsuMonsterTerminal::cmdMeshAnnounce(const char *args)
     // empty, the proto layer fills in the compile-time defaults.
     const char *long_name  = nullptr;
     const char *short_name = nullptr;
-    // Simplest possible split — find the last space; everything before
+    // Simplest possible split - find the last space; everything before
     // is long_name, everything after is short_name. Works for the
     // single-token case (no space → no short override) too.
     char long_buf[32]  = {0};
@@ -1562,16 +1599,16 @@ void MatsuMonsterTerminal::cmdDaycareBeacon()
     if (after.tx_ok > before.tx_ok) {
         printf_line("TX OK (size=%u bytes on-air)", (unsigned)(after.tx_ok - before.tx_ok));
     } else if (after.tx_err > before.tx_err) {
-        println("TX FAILED — check lora_stats");
+        println("TX FAILED - check lora_stats");
     } else {
-        println("TX status unclear — check lora_stats");
+        println("TX status unclear - check lora_stats");
     }
 }
 
 void MatsuMonsterTerminal::cmdLoraTxTest(const char *args)
 {
     if (!meshtastic_lora_is_up()) {
-        println("(radio not up — try lora_reinit)");
+        println("(radio not up - try lora_reinit)");
         return;
     }
     int n = 0;
@@ -1963,7 +2000,7 @@ void MatsuMonsterTerminal::drawSidePanel()
     int bottom = canvas_h_ - 4;
     int right  = canvas_w_ - 4;
 
-    // Vertical separator — draw as a 1px-wide column directly
+    // Vertical separator - draw as a 1px-wide column directly
     uint16_t *raw = (uint16_t *)pax_buf_get_pixels(fb_);
     uint16_t dim565 = (uint16_t)(((0x70>>3)<<11)|((0x70>>2)<<5)|(0x70>>3));
     int base = px * 480 + (480 - 1 - top);

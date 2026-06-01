@@ -56,7 +56,9 @@ public:
                                   uint32_t rngSeed);
 
     // Local roguelike battle. CPU runs side 1.
-    void startLocal(const Gen1Party &myParty, const Gen1Party &cpuParty);
+    // intro overrides the default "A wild battle begins!" log line.
+    void startLocal(const Gen1Party &myParty, const Gen1Party &cpuParty,
+                    const char *intro = nullptr);
 
     void exit();
 

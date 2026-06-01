@@ -6,7 +6,7 @@ This project "MatsuMonsterMesh" combines two things:
 
 Players use LoRa radio to exchange daycare beacons and battle over the mesh — no internet required. The emulator's live SRAM is the source of truth for party data.
 
-## Current State (Session 13)
+## Current State (Session 13b)
 
 - GBC emulation at ~60 FPS with save states, rewind, fast forward
 - Bidirectional daycare interop with upstream MonsterMesh on T-Deck verified on hardware
@@ -15,9 +15,12 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - Channel-aware RX decryption: iterates all registered channel keys (replaces hardcoded fallback)
 - Channel-aware TX: encrypts with active channel's PSK and hash
 - Terminal commands: ch_list, ch_add, ch_del, ch_set, ch_reset, clear for channel management
+- Short command aliases: `st`, `f`, `q`, `ls`, `lr`, `li`, `lp`, `lt`, `mr`, `mm`, `ms`, `ma`, `mn`, `db`, `mq`, `cl`, `ca`, `cd`, `cs`, `cr`
 - Chat UI side panel showing channel list, active channel info, node count, MQTT status
 - Fn+1..8 hotkeys in chat UI to switch active TX channel
 - MQTT transport: WiFi auto-connect, TLS to EMQX broker, channel-based routing (MonsterMesh=MQTT only, no LoRa fallback)
+- MQTT RX subscription broadened to `kanto/2/e/#` to catch beacons regardless of channel name
+- MQTT RX: PKI topics skipped, channel hash taken from MeshPacket (not hardcoded)
 - MQTT TX callback returns bool; MonsterMesh channel drops packet if MQTT unavailable (no LoRa leak)
 - MQTT ServiceEnvelope encoding with correct Meshtastic proto field numbers (verified against official mesh.proto)
 - MQTT RX: ServiceEnvelope decoding, hop_limit=0 injection to prevent LoRa relay of MQTT packets
@@ -34,6 +37,9 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 - Terminal + chat input lines scroll horizontally when text overflows the left panel
 - Terminal fully pax-free: header, input line, side panel, battle panel all use FastText
 - FastText `fast_hline()` / `fast_rect()` primitives for separators and cursors
+- Fight command: local mirror match vs CPU copy of neighbor's party (was networked)
+- Battle intro text: "A trainer battle begins!" for fight/gym/e4, "A wild battle begins!" for run
+- All terminal strings use ASCII only (no Unicode em dashes — glyph cache is ASCII 32-127)
 - **Legend of Charizard (LORD)**: full gym + Elite Four + Champion campaign
   - 8 Kanto gyms (4 grunts + leader each), linear badge-gated progression
   - Elite Four + Champion (Lorelei, Bruno, Agatha, Lance, Blue) — requires all 8 badges

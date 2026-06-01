@@ -35,8 +35,9 @@ goes through a `MeshtasticRadio` interface; cart RAM goes through an
 `IEmulatorSRAM` interface. The emulator stays untouched.
 
 You hit **Fn+T** during emulation to drop into the MonsterMesh terminal,
-where commands like `party`, `status`, `fight <name>`, and `run` drive
+where commands like `party`, `st`, `f <name>`, and `run` drive
 the daycare and battle systems against other Tanmatsu users on the mesh.
+All commands have short aliases (type `help` or `?` for the full list).
 **Fn+M** opens the Meshtastic chat view, and you can jump directly
 between terminal and chat with Fn+T / Fn+M without returning to the
 emulator.

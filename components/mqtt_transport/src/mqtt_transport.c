@@ -35,8 +35,13 @@ static const char *TAG = "mqtt";
 #define MQTT_ROOT_TOPIC   "kanto"
 #define MQTT_CHANNEL_NAME "MonsterMesh"
 
-// Subscribe topic: all MonsterMesh traffic
-#define MQTT_SUB_TOPIC    MQTT_ROOT_TOPIC "/2/e/" MQTT_CHANNEL_NAME "/#"
+// Subscribe topic: all encrypted traffic on this root.
+// We subscribe broadly so we don't miss beacons if the peer's channel name
+// differs slightly (e.g. "MonsterMesh" vs "MonsterMesh Center").  LongFast
+// traffic won't appear here because peers keep MQTT uplink disabled on that
+// channel.  The drain task tries every registered PSK anyway, so decryption
+// is channel-agnostic.
+#define MQTT_SUB_TOPIC    MQTT_ROOT_TOPIC "/2/e/#"
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -328,9 +333,10 @@ static void handle_mqtt_message(const uint8_t *data, size_t data_len)
         return;
     }
 
-    ESP_LOGI(TAG, "mqtt rx from=!%08lx to=%08lx id=%08lx enc=%u",
+    ESP_LOGI(TAG, "mqtt rx from=!%08lx to=%08lx id=%08lx ch=0x%02x enc=%u",
              (unsigned long)mp.from, (unsigned long)mp.to,
-             (unsigned long)mp.id, (unsigned)mp.encrypted_len);
+             (unsigned long)mp.id, (unsigned)mp.channel,
+             (unsigned)mp.encrypted_len);
 
     // Reconstruct 16-byte on-air header + encrypted payload
     size_t total = MESHTASTIC_HEADER_LEN + mp.encrypted_len;
@@ -359,7 +365,7 @@ static void handle_mqtt_message(const uint8_t *data, size_t data_len)
     // via_mqtt bit set to mark origin.
     uint8_t flags = 0x10;  // hop_limit=0, via_mqtt=1, hop_start=0
     raw[12] = flags;
-    raw[13] = 0x25;  // MonsterMesh channel hash
+    raw[13] = (uint8_t)mp.channel;  // channel hash from MeshPacket
     raw[14] = 0;     // next_hop
     raw[15] = 0;     // relay_node
     // Encrypted payload
@@ -426,6 +432,11 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                      event->topic_len, event->data_len);
             if (event->topic && event->topic_len > 0) {
                 ESP_LOGI(TAG, "  topic: %.*s", event->topic_len, event->topic);
+                // Skip PKI-encrypted topics (we can't decrypt those)
+                if (memmem(event->topic, event->topic_len, "/PKI/", 5)) {
+                    ESP_LOGD(TAG, "  skipping PKI topic");
+                    break;
+                }
             }
             if (event->data && event->data_len > 0) {
                 handle_mqtt_message((const uint8_t *)event->data,

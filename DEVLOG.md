@@ -9,6 +9,38 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session May 31 2026b — MQTT RX fix, short aliases, ASCII cleanup (Session 13b)
+
+### Changes
+- **MQTT subscription broadened**: changed from `kanto/2/e/MonsterMesh/#` to
+  `kanto/2/e/#` — the narrow subscription missed beacons from peers whose MQTT
+  channel name didn't match "MonsterMesh" exactly. PKI topics are filtered out
+  in the handler. Channel hash in reconstructed raw header now taken from the
+  decoded MeshPacket instead of hardcoded 0x25.
+- **Short command aliases**: all terminal commands now have 1-2 letter shortcuts
+  (`st`, `f`, `q`, `ls`, `lr`, `mr`, `mm`, `mq`, `cl`, `ca`, etc.). Help text
+  reorganized into categorized sections (Game, LoRa, Mesh, Channels).
+- **ASCII-only terminal strings**: replaced all Unicode em dashes (`—`) and
+  `≥` with ASCII equivalents throughout MatsuMonsterTerminal.cpp. The FastText
+  glyph cache only covers ASCII 32-127; Unicode rendered as `???`.
+- **Battle intro text**: added optional `intro` parameter to
+  `MonsterMeshTextBattle::startLocal()`. Fight/gym/e4 battles now say
+  "A trainer battle begins!" while wild encounters keep the default.
+- **Fight command → local mirror match**: `fight <name>` now starts a local
+  battle against a CPU copy of the neighbor's party (was networked via
+  `startNetworkedAsInitiator`). Displays trainer name + lead Pokemon info.
+- **Neighbor display fix**: empty `gameName` in daycare beacons now shows
+  `(no name)` instead of `???`.
+
+### Technical notes
+- `mqtt_transport.c`: broader subscription catches all encrypted channel traffic;
+  `memmem()` check skips PKI topics early
+- `MonsterMeshTextBattle.h/cpp`: `startLocal()` signature gains `const char *intro = nullptr`
+- MatsuMonsterTerminal.cpp: ~30 em dash replacements, help text rewrite, fight
+  command rewrite (builds Gen1Party from neighbor's DaycareBeacon data)
+
+---
+
 ## Session May 31 2026 — Elite Four, Routes, MQTT TX fix, LORD campaign (Session 13)
 
 ### Changes

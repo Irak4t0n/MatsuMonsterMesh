@@ -96,7 +96,8 @@ void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
 }
 
 void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
-                                       const Gen1Party &cpuParty)
+                                       const Gen1Party &cpuParty,
+                                       const char *intro)
 {
     mode_         = Mode::LOCAL_ROGUELIKE;
     phase_        = Phase::WAIT_ACTION;
@@ -108,7 +109,7 @@ void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
 
     uint32_t rngSeed = (uint32_t)(mm_millis() ^ esp_random());
     engine_.start(myParty, cpuParty, rngSeed);
-    appendLog("A wild battle begins!");
+    appendLog(intro ? intro : "A wild battle begins!");
     dirty_ = true;
 }
 
