@@ -433,6 +433,7 @@ void PokemonDaycare::handleBeacon(const DaycareBeacon &beacon) {
         neighbors_[slot].party[i].level   = beacon.pokemon[i].level;
         strncpy(neighbors_[slot].party[i].nickname, beacon.pokemon[i].nickname, 10);
         neighbors_[slot].party[i].nickname[10] = '\0';
+        memcpy(neighbors_[slot].party[i].moves, beacon.pokemon[i].moves, 4);
     }
     if (cnt > 0) {
         neighbors_[slot].speciesDex = beacon.pokemon[0].species;

@@ -881,7 +881,14 @@ void MatsuMonsterTerminal::cmdFight(const char *args)
     for (uint8_t i = 0; i < n; ++i) {
         const auto &src = match->party[i];
         if (src.species == 0) { cpuParty.count = i; break; }
-        build_wild_mon(cpuParty.mons[i], src.species, src.level, src.moves);
+        // If beacon carried no moves (all zero), give Tackle so the CPU
+        // can actually attack (older beacons or beacons before check-in).
+        uint8_t moves[4];
+        memcpy(moves, src.moves, 4);
+        if (moves[0] == 0 && moves[1] == 0 && moves[2] == 0 && moves[3] == 0) {
+            pick_moves_for_species(src.species, src.level, moves);
+        }
+        build_wild_mon(cpuParty.mons[i], src.species, src.level, moves);
         cpuParty.species[i] = src.species;
         const char *nick = src.nickname[0] ? src.nickname : speciesName(src.species);
         snprintf((char *)cpuParty.nicknames[i], 11, "%s", nick);
