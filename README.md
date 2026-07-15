@@ -219,8 +219,11 @@ Things that work today:
 - In-emulator notification overlay for incoming mesh messages
 - LoRa RX: receives Meshtastic packets (NodeInfo, text, PRIVATE_APP)
   with multi-key decryption (LongFast, MonsterMesh, plaintext)
-- LoRa TX: sends packets including full 122-byte daycare beacons on
-  the MonsterMesh channel (AES-128-CTR encrypted, ch=0x25)
+- LoRa TX: sends packets including full 123-byte daycare beacons on
+  the MonsterMesh channel (AES-128-CTR encrypted, ch=0x25), including
+  the upstream `ngPlusTier` + `requestResponse` (hollaback) fields
+- MQTT broker credentials configurable via NVS (namespace `mm_mqtt`,
+  keys `broker`/`user`/`pass`) — no need to edit source
 - Daycare auto-check-in on ROM load with real Meshtastic short name
 - Daycare beacon RX/TX: bidirectional with upstream MonsterMesh on
   T-Deck — neighbours visible in `status` with names and pokemon

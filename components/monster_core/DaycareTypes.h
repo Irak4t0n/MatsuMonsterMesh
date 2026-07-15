@@ -414,8 +414,14 @@ struct DaycareBeacon {
         uint8_t moves[4];
     } pokemon[6];
     uint8_t  ngPlusTier;    // 0 = base game; 1..5 = Legend of Charizard NG+
+    uint8_t  requestResponse; // 1 = boot/manual beacon, peers should reply
+                              // with their own beacon (upstream "hollaback").
+                              // 0 = periodic / reply beacon (no ping-pong).
 };
 #pragma pack(pop)
+// Wire size = 123 bytes, matching current upstream MonsterMesh. Upstream RX
+// accepts >= sizeof - 1, and our RX zero-fills + clamps, so 122-byte beacons
+// from older firmware still parse (requestResponse reads as 0).
 
 // ── Compact beacon wire format ──────────────────────────────────────────────
 // Compact format drops nicknames and moves (2 bytes/pokemon instead of 17).

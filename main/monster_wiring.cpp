@@ -25,6 +25,13 @@
 
 static const char *TAG = "MMWire";
 
+// Set to 1 to hex-dump every PRIVATE_APP packet and per-mon beacon fields.
+// Costs a 240-char sprintf per packet on the emulator task's hot path, so
+// keep it off outside wire-format debugging sessions.
+#ifndef MM_WIRE_VERBOSE_RX
+#define MM_WIRE_VERBOSE_RX 0
+#endif
+
 // audio_mute / blit_task_handle live in main.c — declare them so we can
 // pause emulator audio + display while the terminal owns the screen.
 extern "C" volatile int  audio_mute;
@@ -74,9 +81,10 @@ static void daycare_send_beacon_cb(const DaycareBeacon &beacon, void *ctx)
     (void)ctx;
     DaycareBeacon b = beacon;
     b.nodeId = meshtastic_proto_node_id();
-    // Send the FULL struct (sizeof = 122 bytes) — the upstream T-Deck
-    // checks `payload_len >= sizeof(DaycareBeacon)` and rejects short
-    // beacons. Empty pokemon slots are zero-initialized.
+    // Send the FULL struct (sizeof = 123 bytes, incl. ngPlusTier +
+    // requestResponse) — matches current upstream, whose RX accepts
+    // `payload_len >= sizeof(DaycareBeacon) - 1` for back-compat.
+    // Empty pokemon slots are zero-initialized.
     s_radio.sendPacket(0xFFFFFFFF, 0, (const uint8_t *)&b, sizeof(b));
 }
 
@@ -257,6 +265,7 @@ extern "C" void monster_daycare_tick(void)
         ESP_LOGI(TAG, "  pkt[%d] from=!%08lx type=0x%02x len=%u",
                  i, (unsigned long)pkts[i].from, type,
                  (unsigned)pkts[i].payload_len);
+#if MM_WIRE_VERBOSE_RX
         // Debug: hex dump first 80 bytes of payload for format analysis.
         {
             char hex[80*3+1]; hex[0] = '\0';
@@ -265,6 +274,7 @@ extern "C" void monster_daycare_tick(void)
                 sprintf(hex + j*3, "%02x ", pkts[i].payload[j]);
             ESP_LOGI(TAG, "  hex: %s", hex);
         }
+#endif
         // Full beacon (0x60) — sent by T-Deck Plus / upstream MonsterMesh.
         if (type == DAYCARE_BEACON_TYPE_FULL &&
             pkts[i].payload_len >= offsetof(DaycareBeacon, pokemon)) {
@@ -272,16 +282,19 @@ extern "C" void monster_daycare_tick(void)
             size_t copy = pkts[i].payload_len < sizeof(DaycareBeacon)
                               ? pkts[i].payload_len : sizeof(DaycareBeacon);
             memcpy(&beacon, pkts[i].payload, copy);
-            ESP_LOGI(TAG, "  beacon: node=!%08lx short='%.5s' game='%.8s' party=%u ngp=%u",
+            ESP_LOGI(TAG, "  beacon: node=!%08lx short='%.5s' game='%.8s' party=%u ngp=%u rr=%u",
                      (unsigned long)beacon.nodeId, beacon.shortName,
                      beacon.gameName, (unsigned)beacon.partyCount,
-                     (unsigned)beacon.ngPlusTier);
+                     (unsigned)beacon.ngPlusTier,
+                     (unsigned)beacon.requestResponse);
+#if MM_WIRE_VERBOSE_RX
             for (uint8_t p = 0; p < beacon.partyCount && p < 6; p++) {
                 ESP_LOGI(TAG, "    mon[%u] species=%u lv=%u nick='%.11s'",
                          (unsigned)p, (unsigned)beacon.pokemon[p].species,
                          (unsigned)beacon.pokemon[p].level,
                          beacon.pokemon[p].nickname);
             }
+#endif
             // Populate nodedb from beacon short name so chat shows names
             // even without a formal NodeInfo exchange.
             if (beacon.shortName[0]) {

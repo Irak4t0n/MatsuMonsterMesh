@@ -3,6 +3,7 @@
 
 #include "PokemonDaycare.h"
 #include "DaycareData.h"
+#include "LordLogic.h"             // lordCurrentNgPlusTier() for beacon TX
 #include "monster_core_compat.h"
 #include <string.h>
 #include <stdio.h>
@@ -12,7 +13,7 @@
 // ── Timing constants ────────────────────────────────────────────────────────
 
 static constexpr uint32_t EVENT_INTERVAL_MS     = 1800000;   // 30 min
-static constexpr uint32_t BEACON_INTERVAL_MS    = 30000;     // 30 sec (debug — raise to 300000 for production)
+static constexpr uint32_t BEACON_INTERVAL_MS    = 300000;    // 5 min (was 30 sec debug value; upstream uses 15 min)
 static constexpr uint32_t NEIGHBOR_TIMEOUT_MS   = 7200000;   // 2 hours = neighbor gone (generous for LoRa)
 static constexpr uint32_t DECAY_INTERVAL_MS     = 86400000;  // 1 day
 static constexpr uint32_t SAVE_INTERVAL_MS      = 300000;    // 5 min autosave
@@ -440,6 +441,15 @@ void PokemonDaycare::handleBeacon(const DaycareBeacon &beacon) {
         neighbors_[slot].nickname[10] = '\0';
     }
     neighborLastSeen_[slot] = mm_millis();
+
+    // Upstream "hollaback": a boot/manual beacon sets requestResponse=1 and
+    // expects a reply beacon so the requester's neighbor list populates
+    // immediately. Reply with requestResponse=0 to prevent ping-pong.
+    // (Self-echoes are filtered before this handler is reached.)
+    if (beacon.requestResponse && active_ && sendBeacon_) {
+        broadcastBeacon(mm_millis(), false);
+        state_.lastBeaconMs = mm_millis();
+    }
 }
 
 void PokemonDaycare::expireNeighbors(uint32_t nowMs) {
@@ -459,7 +469,7 @@ void PokemonDaycare::expireNeighbors(uint32_t nowMs) {
 
 // ── Beacon broadcast ────────────────────────────────────────────────────────
 
-void PokemonDaycare::broadcastBeacon(uint32_t nowMs) {
+void PokemonDaycare::broadcastBeacon(uint32_t nowMs, bool requestResponse) {
     if (!sendBeacon_) return;
 
     DaycareBeacon beacon = {};
@@ -473,6 +483,12 @@ void PokemonDaycare::broadcastBeacon(uint32_t nowMs) {
         beacon.pokemon[i].level = state_.pokemon[i].savLevel + state_.pokemon[i].totalLevelsGained;
         strncpy(beacon.pokemon[i].nickname, state_.pokemon[i].nickname, 10);
     }
+    // Upstream parity: broadcast our current Legend of Charizard NG+ tier so
+    // peers scale their view of our party. Previously always sent 0.
+    beacon.ngPlusTier = lordCurrentNgPlusTier();
+    // Boot/manual beacons ask peers to reply so our neighbor list populates
+    // within seconds instead of waiting for their periodic beacon.
+    beacon.requestResponse = requestResponse ? 1 : 0;
 
     sendBeacon_(beacon, sendBeaconCtx_);
 }

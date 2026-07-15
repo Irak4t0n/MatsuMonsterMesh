@@ -19,4 +19,5 @@ idf_component_register(
         log
         esp_common
         esp_hw_support        # esp_read_mac
+        nvs_flash             # MQTT credential override from NVS
 )

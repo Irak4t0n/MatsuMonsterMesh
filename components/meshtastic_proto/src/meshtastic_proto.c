@@ -67,6 +67,23 @@ static const uint8_t MESHTASTIC_MM_KEY[16] = {
 static meshtastic_channel_t s_channels[MESHTASTIC_MAX_CHANNELS];
 static uint8_t              s_tx_channel = 0;  // active TX channel index
 
+// Guards s_channels / s_tx_channel. The terminal task mutates the registry
+// (ch_add/ch_del/ch_set/ch_reset) while the drain task iterates it on every
+// RX and the TX paths read it — previously unsynchronized (a live slot could
+// be memset mid-decrypt). Created in channel_registry_init(), which runs
+// before the drain/announcer tasks start.
+static SemaphoreHandle_t    s_chan_mtx = NULL;
+
+static inline void chan_lock(void)
+{
+    if (s_chan_mtx) xSemaphoreTake(s_chan_mtx, portMAX_DELAY);
+}
+
+static inline void chan_unlock(void)
+{
+    if (s_chan_mtx) xSemaphoreGive(s_chan_mtx);
+}
+
 uint8_t meshtastic_channel_hash(const char *name,
                                  const uint8_t *psk, uint8_t psk_len)
 {
@@ -142,6 +159,7 @@ static void channel_registry_defaults(void)
 
 static void channel_registry_init(void)
 {
+    if (!s_chan_mtx) s_chan_mtx = xSemaphoreCreateMutex();
     memset(s_channels, 0, sizeof(s_channels));
     s_tx_channel = 0;
 
@@ -154,7 +172,10 @@ static void channel_registry_init(void)
 int meshtastic_channel_add(const char *name,
                             const uint8_t *psk, uint8_t psk_len)
 {
-    if (!name || psk_len > 32) return -1;
+    // Meshtastic PSKs are 0 (plaintext), 16 (AES-128), or 32 (AES-256) bytes.
+    if (!name) return -1;
+    if (psk_len != 0 && psk_len != 16 && psk_len != 32) return -1;
+    chan_lock();
     // Find first empty slot (skip 0 — reserved for LongFast)
     for (int i = 1; i < MESHTASTIC_MAX_CHANNELS; i++) {
         if (!s_channels[i].in_use) {
@@ -170,20 +191,27 @@ int meshtastic_channel_add(const char *name,
             ch->hash   = meshtastic_channel_hash(name, ch->psk, psk_len);
             ch->in_use = true;
             channel_registry_save();
+            chan_unlock();
             return i;
         }
     }
+    chan_unlock();
     return -1;  // full
 }
 
 esp_err_t meshtastic_channel_remove(uint8_t index)
 {
     if (index == 0 || index >= MESHTASTIC_MAX_CHANNELS) return ESP_ERR_INVALID_ARG;
-    if (!s_channels[index].in_use) return ESP_ERR_NOT_FOUND;
+    chan_lock();
+    if (!s_channels[index].in_use) {
+        chan_unlock();
+        return ESP_ERR_NOT_FOUND;
+    }
     memset(&s_channels[index], 0, sizeof(s_channels[0]));
     // If we removed the active TX channel, fall back to 0
     if (s_tx_channel == index) s_tx_channel = 0;
     channel_registry_save();
+    chan_unlock();
     return ESP_OK;
 }
 
@@ -205,19 +233,23 @@ uint8_t meshtastic_channel_count(void)
 
 void meshtastic_channel_set_tx(uint8_t index)
 {
+    chan_lock();
     if (index < MESHTASTIC_MAX_CHANNELS && s_channels[index].in_use) {
         s_tx_channel = index;
         channel_registry_save();
     }
+    chan_unlock();
 }
 
 uint8_t meshtastic_channel_get_tx(void) { return s_tx_channel; }
 
 void meshtastic_channel_reset(void)
 {
+    chan_lock();
     channel_registry_defaults();
     s_tx_channel = 0;
     channel_registry_save();
+    chan_unlock();
     ESP_LOGI(TAG, "channel registry reset to defaults");
 }
 
@@ -240,13 +272,18 @@ static void build_nonce(uint8_t out[16], uint32_t from_node, uint32_t packet_id)
     // bytes 12-15 = extraNonce, zero
 }
 
-static esp_err_t aes128_ctr_crypt(const uint8_t key[16],
-                                   uint32_t from_node, uint32_t packet_id,
-                                   const uint8_t *in, size_t len,
-                                   uint8_t *out)
+// AES-CTR with key length selected from the PSK size: 16-byte PSKs use
+// AES-128 (Meshtastic default), 32-byte PSKs use AES-256 (Meshtastic
+// "custom key" channels). Previously this hardcoded 128 bits, silently
+// truncating 32-byte PSKs added via ch_add.
+static esp_err_t aes_ctr_crypt(const uint8_t *key, uint8_t key_len,
+                                uint32_t from_node, uint32_t packet_id,
+                                const uint8_t *in, size_t len,
+                                uint8_t *out)
 {
     if (!in || !out)  return ESP_ERR_INVALID_ARG;
     if (len == 0)     return ESP_OK;
+    if (key_len != 16 && key_len != 32) return ESP_ERR_INVALID_ARG;
 
     uint8_t nonce[16];
     build_nonce(nonce, from_node, packet_id);
@@ -256,7 +293,7 @@ static esp_err_t aes128_ctr_crypt(const uint8_t key[16],
 
     mbedtls_aes_context ctx;
     mbedtls_aes_init(&ctx);
-    int rc = mbedtls_aes_setkey_enc(&ctx, key, 128);
+    int rc = mbedtls_aes_setkey_enc(&ctx, key, key_len == 32 ? 256 : 128);
     if (rc != 0) {
         mbedtls_aes_free(&ctx);
         return ESP_FAIL;
@@ -270,8 +307,8 @@ esp_err_t meshtastic_decrypt_longfast(uint32_t from_node, uint32_t packet_id,
                                       const uint8_t *in, size_t len,
                                       uint8_t *out)
 {
-    return aes128_ctr_crypt(MESHTASTIC_LONGFAST_KEY, from_node, packet_id,
-                            in, len, out);
+    return aes_ctr_crypt(MESHTASTIC_LONGFAST_KEY, 16, from_node, packet_id,
+                         in, len, out);
 }
 
 int meshtastic_guess_portnum(const uint8_t *plain, size_t len)
@@ -832,19 +869,26 @@ static esp_err_t send_data_frame(uint32_t to, uint32_t pkt_id,
 static esp_err_t send_data_frame_ch(uint8_t ch_idx, uint32_t to, uint32_t pkt_id,
                                      uint8_t *data_pb, size_t data_len)
 {
-    if (ch_idx >= MESHTASTIC_MAX_CHANNELS || !s_channels[ch_idx].in_use) {
-        return ESP_ERR_INVALID_ARG;
-    }
     if (data_len == 0 || data_len + MESHTASTIC_HEADER_LEN > ML_RAW_MAX_LEN) {
         return ESP_ERR_INVALID_SIZE;
     }
-    const meshtastic_channel_t *ch = &s_channels[ch_idx];
+    // Snapshot the channel under the mutex so a concurrent ch_del/ch_reset
+    // can't zero the key while we encrypt with it.
+    meshtastic_channel_t ch_copy;
+    chan_lock();
+    if (ch_idx >= MESHTASTIC_MAX_CHANNELS || !s_channels[ch_idx].in_use) {
+        chan_unlock();
+        return ESP_ERR_INVALID_ARG;
+    }
+    ch_copy = s_channels[ch_idx];
+    chan_unlock();
+    const meshtastic_channel_t *ch = &ch_copy;
     uint32_t from = meshtastic_proto_node_id();
 
     uint8_t encrypted[ML_RAW_MAX_LEN];
     if (ch->psk_len > 0) {
-        esp_err_t err = aes128_ctr_crypt(ch->psk, from, pkt_id,
-                                          data_pb, data_len, encrypted);
+        esp_err_t err = aes_ctr_crypt(ch->psk, ch->psk_len, from, pkt_id,
+                                       data_pb, data_len, encrypted);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "encrypt ch[%d] failed: %s", ch_idx, esp_err_to_name(err));
             return err;
@@ -902,8 +946,8 @@ static esp_err_t send_data_frame_mm(uint32_t to, uint32_t pkt_id,
 
     // Encrypt the Data protobuf with the MonsterMesh channel key.
     uint8_t encrypted[ML_RAW_MAX_LEN];
-    esp_err_t err = aes128_ctr_crypt(MESHTASTIC_MM_KEY, from, pkt_id,
-                                      data_pb, data_len, encrypted);
+    esp_err_t err = aes_ctr_crypt(MESHTASTIC_MM_KEY, 16, from, pkt_id,
+                                   data_pb, data_len, encrypted);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "mm encrypt failed: %s", esp_err_to_name(err));
         return err;
@@ -1222,12 +1266,15 @@ static void drain_task(void *arg)
                 uint8_t plain[ML_RAW_MAX_LEN];
                 const uint8_t *decoded = NULL;
 
-                // Try each registered channel's key.
+                // Try each registered channel's key. Hold the channel mutex
+                // for the whole scan so ch_add/ch_del/ch_reset from the
+                // terminal can't memset a slot mid-decrypt.
+                chan_lock();
                 for (int ci = 0; ci < MESHTASTIC_MAX_CHANNELS && !decoded; ci++) {
                     if (!s_channels[ci].in_use) continue;
                     if (s_channels[ci].psk_len > 0) {
-                        esp_err_t derr = aes128_ctr_crypt(
-                            s_channels[ci].psk,
+                        esp_err_t derr = aes_ctr_crypt(
+                            s_channels[ci].psk, s_channels[ci].psk_len,
                             entry.header.from, entry.header.id,
                             raw + payload_off, payload_len, plain);
                         if (derr == ESP_OK) {
@@ -1249,6 +1296,7 @@ static void drain_task(void *arg)
                         }
                     }
                 }
+                chan_unlock();
 
                 // Last resort: try plaintext even if no PSK=0 channel registered
                 if (!decoded) {
@@ -1495,7 +1543,9 @@ esp_err_t meshtastic_proto_begin(void)
     meshtastic_nodedb_upsert(meshtastic_proto_node_id(),
                              MT_DEFAULT_LONG_NAME, MT_DEFAULT_SHORT_NAME);
 
-    if (xTaskCreate(drain_task, "mp_drain", 4 * 1024, NULL, 5, &s_drain_task) != pdPASS) {
+    // 6 KB: drain_task stacks raw[256] + plain[256] + recent-entry struct +
+    // an mbedtls AES context (larger for AES-256 keys); 4 KB left little headroom.
+    if (xTaskCreate(drain_task, "mp_drain", 6 * 1024, NULL, 5, &s_drain_task) != pdPASS) {
         ESP_LOGE(TAG, "drain task alloc failed");
         vSemaphoreDelete(s_ring_mtx);
         s_ring_mtx = NULL;

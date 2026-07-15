@@ -67,8 +67,10 @@ public:
     // Force an immediate event cycle (for testing)
     void forceEvent() { if (active_) { runEventCycle(mm_millis()); state_.lastEventMs = mm_millis(); } }
 
-    // Force an immediate beacon broadcast (call after auto-checkin)
-    void forceBeacon() { if (active_) { broadcastBeacon(mm_millis()); state_.lastBeaconMs = mm_millis(); } }
+    // Force an immediate beacon broadcast (call after auto-checkin).
+    // Sets requestResponse=1 so upstream MonsterMesh peers reply with their
+    // own beacon ("hollaback"), populating our neighbor list immediately.
+    void forceBeacon() { if (active_) { broadcastBeacon(mm_millis(), true); state_.lastBeaconMs = mm_millis(); } }
 
     // Trigger a "dog park" arrival event when a new trainer comes online
     // Returns true if an event was generated (and DM sent)
@@ -157,7 +159,7 @@ private:
     void updateMood(uint32_t nowMs);
     void decayFriendships(uint32_t nowMs);
     void expireNeighbors(uint32_t nowMs);
-    void broadcastBeacon(uint32_t nowMs);
+    void broadcastBeacon(uint32_t nowMs, bool requestResponse = false);
     void updateWeatherCounters(DaycareWeatherType type);
     void updateEventCounters(const DaycareEvent &evt, uint8_t targetIdx);
     bool isNight() const;

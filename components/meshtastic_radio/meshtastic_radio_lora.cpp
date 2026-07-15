@@ -74,8 +74,11 @@ bool LoRaMeshtasticRadio::begin()
 bool LoRaMeshtasticRadio::sendPacket(uint32_t dest, uint8_t channel,
                                       const uint8_t *payload, size_t len)
 {
-    // All MonsterMesh PRIVATE_APP traffic goes on the MonsterMesh Center
-    // channel (unencrypted, channel hash 0x00) for T-Deck compatibility.
+    // All MonsterMesh PRIVATE_APP traffic goes on the MonsterMesh channel
+    // (AES-128, PSK "MonsterMesh!2024", hash 0x25) and is delivered via the
+    // MQTT bridge only — send_data_frame_mm intentionally has no LoRa
+    // fallback, so battle/daycare packets are dropped when MQTT is down.
+    // The `channel` arg is unused; the MonsterMesh channel is implied.
     (void)channel;
     esp_err_t err = meshtastic_send_private_mm(dest, payload, len);
     if (err != ESP_OK) {

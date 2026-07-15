@@ -6,7 +6,29 @@ This project "MatsuMonsterMesh" combines two things:
 
 Players use LoRa radio to exchange daycare beacons and battle over the mesh — no internet required. The emulator's live SRAM is the source of truth for party data.
 
-## Current State (Session 13b)
+## Current State (Session 14)
+
+Session 14 (Jul 15 2026) — full review vs upstream, see REVIEW_2026-07-15.md:
+- DaycareBeacon is now 123 bytes: added `requestResponse` (hollaback) after
+  `ngPlusTier`, matching current upstream; RX on both sides tolerates 122
+- `broadcastBeacon` fills `ngPlusTier` from `lordCurrentNgPlusTier()` (was
+  always 0 on the wire) and sets `requestResponse=1` on boot/manual beacons;
+  incoming rr=1 beacons get a rr=0 reply beacon
+- AES-256 channels fixed: `aes_ctr_crypt` picks 128/256-bit keys from psk_len
+  (was hardcoded 128, truncating 32-byte PSKs); ch_add rejects non-0/16/32 PSKs
+- Channel registry (`s_channels`/`s_tx_channel`) now mutex-guarded against
+  terminal-vs-drain-task races; TX snapshots the channel under the lock
+- MQTT credentials read from NVS (`mm_mqtt`: broker/user/pass) with source
+  fallback — ROTATE the old leaked EMQX password
+- Beacon interval 30s debug → 5 min; drain_task stack 4K → 6K
+- RX hex-dump/per-mon logging gated behind MM_WIRE_VERBOSE_RX (default 0)
+- git: untracked build_log*.txt + .claude/settings.local.json; CLAUDE.md
+  un-ignored (rules require committing it)
+- Known upstream gaps (documented, not ported): networked PvP initiation
+  (0x66-0x6C server-auth protocol), Gauntlet/mmg (0x70-0x76), Dungeon
+  (0x80-0x86), hb command, upstream engine gen=3 default
+
+## Previous State (Session 13b)
 
 - GBC emulation at ~60 FPS with save states, rewind, fast forward
 - Bidirectional daycare interop with upstream MonsterMesh on T-Deck verified on hardware

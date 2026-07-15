@@ -9,6 +9,63 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session Jul 15 2026 — Fable 5 review: beacon parity, AES-256, channel mutex, cred hygiene (Session 14)
+
+Full-codebase review against upstream monster_mesh (fresh clone). Fixes below;
+the complete findings + upstream feature-parity matrix live in
+`REVIEW_2026-07-15.md`.
+
+### Wire-format parity fixes
+- **DaycareBeacon grew to 123 bytes**: added the `requestResponse` byte after
+  `ngPlusTier`, matching current upstream `DaycareTypes.h`. Upstream RX accepts
+  `>= sizeof-1` and our RX zero-fills + clamps, so old 122-byte beacons still
+  parse on both sides.
+- **Hollaback**: `forceBeacon()` (boot/manual) now sets `requestResponse=1` so
+  upstream peers reply immediately and our neighbor list populates in seconds;
+  `handleBeacon()` answers incoming `requestResponse=1` beacons with a
+  `requestResponse=0` reply (no ping-pong; self-echoes already filtered in the
+  proto layer).
+- **`ngPlusTier` actually transmitted**: `broadcastBeacon()` now fills it from
+  `lordCurrentNgPlusTier()` — previously the struct field existed but always
+  went out as 0 regardless of LORD NG+ progress.
+
+### Bug fixes
+- **AES-256 channels work now**: `aes_ctr_crypt` (renamed from
+  `aes128_ctr_crypt`) selects 128/256-bit key length from `psk_len`.
+  Previously `ch_add` accepted 32-byte PSKs but crypto silently used only the
+  first 16 bytes — every AES-256 channel decrypted garbage. `channel_add` also
+  now rejects PSK lengths other than 0/16/32.
+- **Channel registry mutex**: `s_channels[]`/`s_tx_channel` are now guarded by
+  `s_chan_mtx`. Terminal `ch_add/ch_del/ch_set/ch_reset` could previously
+  memset a slot while the drain task was mid-decrypt with that key.
+  TX (`send_data_frame_ch`) snapshots the channel under the lock.
+- **Beacon interval back to production value**: 30 s debug interval → 5 min
+  (the code comment itself said to raise it; upstream uses 15 min).
+- **drain_task stack 4 KB → 6 KB**: raw[256] + plain[256] + recent-entry +
+  mbedtls AES context left almost no headroom.
+
+### Security / hygiene
+- **MQTT credentials moved to NVS** (namespace `mm_mqtt`, keys
+  `broker`/`user`/`pass`) with the old #defines as fallback. NOTE: the old
+  password was committed to a public repo — **rotate it on the EMQX broker**.
+- Untracked `build_log*.txt` (1 MB+ of logs) and `.claude/settings.local.json`
+  from git (`git rm --cached`, staged). Removed `CLAUDE.md` from `.gitignore`
+  (project rules require committing it); added `build_output.txt`,
+  `reconfig_log.txt`.
+- Hot-path RX hex dump + per-mon beacon logging gated behind
+  `MM_WIRE_VERBOSE_RX` (default off) — was a 240-char sprintf per packet on
+  the emulator task.
+- Fixed stale comments: beacon size 122→123 in `monster_wiring.cpp`; the
+  "unencrypted hash 0x00" claim in `meshtastic_radio_lora.cpp` (actual:
+  AES-128 MonsterMesh channel, MQTT-only delivery).
+
+### Not changed (documented in REVIEW_2026-07-15.md)
+- Networked PvP initiation (upstream server-authoritative `mmb` protocol,
+  PktTypes 0x66-0x6C) — receiver-side lockstep exists but no UI path calls
+  `startNetworkedAsInitiator`.
+- Gauntlet player-hosted gyms (`mmg`, BBS PktTypes 0x70-0x76), co-op Dungeon
+  (0x80-0x86), upstream battle-engine gen=3 default vs our Gen-1 — see report.
+
 ## Session May 31 2026b — MQTT RX fix, short aliases, ASCII cleanup (Session 13b)
 
 ### Changes

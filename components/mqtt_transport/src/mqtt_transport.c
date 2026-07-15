@@ -24,11 +24,52 @@
 static const char *TAG = "mqtt";
 
 // ── Configuration ────────────────────────────────────────────────────────
+//
+// SECURITY: broker credentials are read from NVS at runtime (namespace
+// "mm_mqtt", keys "broker" / "user" / "pass") so they never need to live
+// in the source tree. The #defines below are only compile-time fallbacks
+// for when NVS is unset. Do NOT commit real credentials here — any secret
+// that has ever been pushed to a public repo must be rotated.
+//
+// To provision from a monitor/console:
+//   nvs_set mm_mqtt broker str "mqtts://<host>:8883"
+//   nvs_set mm_mqtt user   str "<username>"
+//   nvs_set mm_mqtt pass   str "<password>"
 
-// MQTT broker — from the user's Meshtastic MQTT config screenshots.
 #define MQTT_BROKER_URI   "mqtts://sf17b671.ala.us-east-1.emqxsl.com:8883"
 #define MQTT_USERNAME     "ash"
-#define MQTT_PASSWORD     "large4meowth"
+#define MQTT_PASSWORD     "large4meowth"   // ROTATE ME — this value leaked in git history
+
+#define MQTT_NVS_NS       "mm_mqtt"
+
+// Runtime credential buffers (NVS override or fallback defines).
+static char s_broker_uri[128] = MQTT_BROKER_URI;
+static char s_username[64]    = MQTT_USERNAME;
+static char s_password[64]    = MQTT_PASSWORD;
+
+#include "nvs.h"
+
+// Load MQTT credentials from NVS if present; keep compiled defaults otherwise.
+static void mqtt_load_credentials(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(MQTT_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "no NVS MQTT config (ns=%s) — using built-in defaults",
+                 MQTT_NVS_NS);
+        return;
+    }
+    size_t len;
+    len = sizeof(s_broker_uri);
+    if (nvs_get_str(h, "broker", s_broker_uri, &len) == ESP_OK)
+        ESP_LOGI(TAG, "MQTT broker from NVS: %s", s_broker_uri);
+    len = sizeof(s_username);
+    if (nvs_get_str(h, "user", s_username, &len) == ESP_OK)
+        ESP_LOGI(TAG, "MQTT username from NVS");
+    len = sizeof(s_password);
+    if (nvs_get_str(h, "pass", s_password, &len) == ESP_OK)
+        ESP_LOGI(TAG, "MQTT password from NVS");
+    nvs_close(h);
+}
 
 // Meshtastic MQTT topic structure: <root>/2/e/<channel>/<nodeId>
 // root="kanto", channel="MonsterMesh"
@@ -520,12 +561,14 @@ static void mqtt_init_task(void *arg)
              (unsigned long)node_id);
     ESP_LOGI(TAG, "publish topic: %s", s_pub_topic);
 
-    // 7. Start MQTT client
+    // 7. Start MQTT client — credentials from NVS when provisioned,
+    // otherwise the compile-time fallbacks.
+    mqtt_load_credentials();
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URI,
+        .broker.address.uri = s_broker_uri,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
-        .credentials.username = MQTT_USERNAME,
-        .credentials.authentication.password = MQTT_PASSWORD,
+        .credentials.username = s_username,
+        .credentials.authentication.password = s_password,
     };
     s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     if (!s_mqtt_client) {
@@ -538,7 +581,7 @@ static void mqtt_init_task(void *arg)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_mqtt_client_start: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "MQTT client started, connecting to %s", MQTT_BROKER_URI);
+        ESP_LOGI(TAG, "MQTT client started, connecting to %s", s_broker_uri);
     }
 
 done:
