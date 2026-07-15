@@ -117,41 +117,62 @@ enum GrowthRate : uint8_t {
     GROWTH_SLOW        = 3,  // 5n^3 / 4
 };
 
-// Growth rate for each Pokedex number (1-151)
-// Source: pret/pokered base_stats/*.asm + Bulbapedia experience type list
+// Growth rate for each Pokedex number (1-251)
+// Source: pret/pokered + pret/pokecrystal base_stats, Bulbapedia exp type list
 // 0=MediumFast(n^3), 1=Fast(4n^3/5), 2=MediumSlow(1.2n^3-15n^2+100n-140), 3=Slow(5n^3/4)
-static const uint8_t speciesGrowthRate[152] = {
+static const uint8_t speciesGrowthRate[252] = {
     0,                          // 0 = unused
-    // 1-10: Bulbasaur, Ivysaur, Venusaur, Charmander, Charmeleon, Charizard, Squirtle, Wartortle, Blastoise, Caterpie
+    // 1-10: Bulbasaur..Caterpie
     2, 2, 2, 2, 2, 2, 2, 2, 2, 0,
-    // 11-20: Metapod, Butterfree, Weedle, Kakuna, Beedrill, Pidgey, Pidgeotto, Pidgeot, Rattata, Raticate
+    // 11-20: Metapod..Raticate
     0, 0, 0, 0, 0, 2, 2, 2, 0, 0,
-    // 21-30: Spearow, Fearow, Ekans, Arbok, Pikachu, Raichu, Sandshrew, Sandslash, NidoranF, Nidorina
+    // 21-30: Spearow..Nidorina
     0, 0, 0, 0, 0, 0, 0, 0, 2, 2,
-    // 31-40: Nidoqueen, NidoranM, Nidorino, Nidoking, Clefairy, Clefable, Vulpix, Ninetales, Jigglypuff, Wigglytuff
+    // 31-40: Nidoqueen..Wigglytuff
     2, 2, 2, 2, 1, 1, 0, 0, 1, 1,
-    // 41-50: Zubat, Golbat, Oddish, Gloom, Vileplume, Paras, Parasect, Venonat, Venomoth, Diglett
+    // 41-50: Zubat..Diglett
     0, 0, 2, 2, 2, 0, 0, 0, 0, 0,
-    // 51-60: Dugtrio, Meowth, Persian, Psyduck, Golduck, Mankey, Primeape, Growlithe, Arcanine, Poliwag
+    // 51-60: Dugtrio..Poliwag
     0, 0, 0, 0, 0, 0, 0, 3, 3, 2,
-    // 61-70: Poliwhirl, Poliwrath, Abra, Kadabra, Alakazam, Machop, Machoke, Machamp, Bellsprout, Weepinbell
+    // 61-70: Poliwhirl..Weepinbell
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    // 71-80: Victreebel, Tentacool, Tentacruel, Geodude, Graveler, Golem, Ponyta, Rapidash, Slowpoke, Slowbro
+    // 71-80: Victreebel..Slowbro
     2, 3, 3, 2, 2, 2, 0, 0, 0, 0,
-    // 81-90: Magnemite, Magneton, Farfetch'd, Doduo, Dodrio, Seel, Dewgong, Grimer, Muk, Shellder
+    // 81-90: Magnemite..Shellder
     0, 0, 0, 0, 0, 0, 0, 0, 0, 3,
-    // 91-100: Cloyster, Gastly, Haunter, Gengar, Onix, Drowzee, Hypno, Krabby, Kingler, Voltorb
+    // 91-100: Cloyster..Voltorb
     3, 2, 2, 2, 0, 0, 0, 0, 0, 0,
-    // 101-110: Electrode, Exeggcute, Exeggutor, Cubone, Marowak, Hitmonlee, Hitmonchan, Lickitung, Koffing, Weezing
+    // 101-110: Electrode..Weezing
     0, 3, 3, 0, 0, 0, 0, 0, 0, 0,
-    // 111-120: Rhyhorn, Rhydon, Chansey, Tangela, Kangaskhan, Horsea, Seadra, Goldeen, Seaking, Staryu
+    // 111-120: Rhyhorn..Staryu
     3, 3, 1, 0, 0, 0, 0, 0, 0, 3,
-    // 121-130: Starmie, Mr. Mime, Scyther, Jynx, Electabuzz, Magmar, Pinsir, Tauros, Magikarp, Gyarados
+    // 121-130: Starmie..Gyarados
     3, 0, 0, 0, 0, 0, 3, 3, 3, 3,
-    // 131-140: Lapras, Ditto, Eevee, Vaporeon, Jolteon, Flareon, Porygon, Omanyte, Omastar, Kabuto
+    // 131-140: Lapras..Kabuto
     3, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    // 141-151: Kabutops, Aerodactyl, Snorlax, Articuno, Zapdos, Moltres, Dratini, Dragonair, Dragonite, Mewtwo, Mew
-    0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2
+    // 141-151: Kabutops..Mew
+    0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2,
+    // ── Gen 2 (152-251) ── Source: pret/pokecrystal base_stats/
+    // 152-160: Chikorita, Bayleef, Meganium, Cyndaquil, Quilava, Typhlosion, Totodile, Croconaw, Feraligatr
+    2, 2, 2, 2, 2, 2, 2, 2, 2,
+    // 161-170: Sentret, Furret, Hoothoot, Noctowl, Ledyba, Ledian, Spinarak, Ariados, Crobat, Chinchou
+    0, 0, 0, 0, 1, 1, 1, 1, 0, 3,
+    // 171-180: Lanturn, Pichu, Cleffa, Igglybuff, Togepi, Togetic, Natu, Xatu, Mareep, Flaaffy
+    3, 0, 1, 1, 1, 1, 0, 0, 2, 2,
+    // 181-190: Ampharos, Bellossom, Marill, Azumarill, Sudowoodo, Politoed, Hoppip, Skiploom, Jumpluff, Aipom
+    2, 2, 1, 1, 0, 2, 2, 2, 2, 1,
+    // 191-200: Sunkern, Sunflora, Yanma, Wooper, Quagsire, Espeon, Umbreon, Murkrow, Slowking, Misdreavus
+    2, 2, 0, 0, 0, 0, 0, 2, 0, 1,
+    // 201-210: Unown, Wobbuffet, Girafarig, Pineco, Forretress, Dunsparce, Gligar, Steelix, Snubbull, Granbull
+    0, 0, 0, 0, 0, 0, 2, 0, 1, 1,
+    // 211-220: Qwilfish, Scizor, Shuckle, Heracross, Sneasel, Teddiursa, Ursaring, Slugma, Magcargo, Swinub
+    0, 0, 2, 3, 2, 0, 0, 0, 0, 3,
+    // 221-230: Piloswine, Corsola, Remoraid, Octillery, Delibird, Mantine, Skarmory, Houndour, Houndoom, Kingdra
+    3, 1, 0, 0, 1, 3, 3, 3, 3, 0,
+    // 231-240: Phanpy, Donphan, Porygon2, Stantler, Smeargle, Tyrogue, Hitmontop, Smoochum, Elekid, Magby
+    0, 0, 0, 3, 1, 0, 0, 0, 0, 0,
+    // 241-251: Miltank, Blissey, Raikou, Entei, Suicune, Larvitar, Pupitar, Tyranitar, Lugia, Ho-Oh, Celebi
+    3, 1, 3, 3, 3, 3, 3, 3, 3, 3, 2
 };
 
 // ── Base stats for stat recalculation (HP, Atk, Def, Spd, Spc) ────────────
@@ -558,7 +579,7 @@ static inline void writeBE24(uint8_t *p, uint32_t val) {
 // ── Experience calculation ─────────────────────────────────────────────────
 
 static uint32_t expForLevel(uint8_t dexNum, uint8_t level) {
-    if (dexNum == 0 || dexNum > 151 || level <= 1) return 0;
+    if (dexNum == 0 || dexNum > 251 || level <= 1) return 0;
 
     uint32_t n = level;
     uint32_t n3 = n * n * n;
@@ -584,7 +605,7 @@ static uint32_t expForLevel(uint8_t dexNum, uint8_t level) {
 
 // Given current total EXP, find what level that corresponds to
 static uint8_t levelForExp(uint8_t dexNum, uint32_t totalExp) {
-    if (dexNum == 0 || dexNum > 151) return 1;
+    if (dexNum == 0 || dexNum > 251) return 1;
 
     uint8_t level = 1;
     for (uint8_t l = 2; l <= 100; l++) {
@@ -1112,6 +1133,37 @@ public:
             }
         }
         return count;
+    }
+
+    // ── Patch Gen 2 Pokemon XP/level directly in WRAM ─────────────────
+    // Called while the emulator is paused (terminal active). Adds xpGained
+    // to the Pokemon at partyIdx, recalculates level, and writes back.
+    // Returns the new level (0 on failure).
+    static uint8_t patchGen2WRAM(uint8_t *wram_bank1, uint8_t partyIdx,
+                                  uint8_t dexNum, uint32_t xpGained) {
+        if (!wram_bank1 || partyIdx >= 6 || dexNum == 0) return 0;
+        uint8_t count = wram_bank1[G2_WRAM_PARTY_COUNT];
+        if (partyIdx >= count) return 0;
+
+        uint8_t *g2 = &wram_bank1[G2_WRAM_POKEMON_DATA + partyIdx * G2_POKEMON_SIZE];
+        // Read current EXP (3 bytes BE at offset 0x08)
+        uint32_t curExp = ((uint32_t)g2[0x08] << 16) |
+                          ((uint32_t)g2[0x09] << 8) | g2[0x0A];
+        uint32_t newExp = curExp + xpGained;
+        uint32_t maxExp = (dexNum <= 251) ? expForLevel(dexNum, 100) : 1000000;
+        if (newExp > maxExp) newExp = maxExp;
+
+        // Write new EXP
+        g2[0x08] = (uint8_t)(newExp >> 16);
+        g2[0x09] = (uint8_t)(newExp >> 8);
+        g2[0x0A] = (uint8_t)(newExp);
+
+        // Calculate and write new level
+        uint8_t newLevel = (dexNum <= 251) ? levelForExp(dexNum, newExp) : g2[0x1F];
+        if (newLevel > 100) newLevel = 100;
+        g2[0x1F] = newLevel;
+
+        return newLevel;
     }
 
     // ── Build a Gen1Party from WRAM (live emulator state) ─────────────

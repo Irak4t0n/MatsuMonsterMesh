@@ -31,6 +31,12 @@ Session 14b (Jul 15 2026) — battle UX fixes for Gen 2 / Crystal:
 - Gen 2 move fallback: if all 4 moves are Gen 2-only (>165), Struggle assigned
 - WAIT_SWITCH phase now renders a visible party list with cursor in the
   battle panel (was invisible, eating all input)
+- XP payout: uses engine party data (not daycare), shares among participants,
+  excludes fainted; explicit participation bitmask tracks switches
+- Gen 2 WRAM XP patching: writes EXP + level directly to live WRAM for
+  Crystal/Gold/Silver (Gen 1 still patches SRAM as before)
+- Gen 2 growth rate table (dex 152-251) for expForLevel/levelForExp
+- Party panel shows XP current/next-level (e.g. `XP 400/525`)
 
 ## Previous State (Session 13b)
 

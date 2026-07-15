@@ -348,6 +348,12 @@ void MatsuMonsterTerminal::pumpBattle()
             panel_dirty_ = true;  // HP/moves changed - redraw battle panel
             battle_->clearDirty();
         }
+        // Track switches for XP participation
+        uint8_t cur = battle_->engine().party(battle_->mySide()).active;
+        if (cur != battle_prev_active_) {
+            battle_participated_ |= (1 << cur);
+            battle_prev_active_ = cur;
+        }
     }
 
     // Auto-dismiss the result screen the moment the engine flips to FINISHED.
@@ -372,32 +378,68 @@ void MatsuMonsterTerminal::pumpBattle()
     if (just_finished && xp_pending_) {
         xp_pending_ = false;
         bool won = battle_->engine().result() == Gen1BattleEngine::Result::P1_WIN;
-        if (won && sram_ && daycare_) {
-            const auto &state = daycare_->getState();
-            if (state.partyCount > 0) {
-                uint8_t lead_dex = state.pokemon[0].speciesDex;
-                uint8_t prev_total_level = state.pokemon[0].savLevel +
-                                            (uint8_t)state.pokemon[0].totalLevelsGained;
-                uint32_t xp = (uint32_t)last_foe_level_ * 8u;
+        if (won && sram_) {
+            const auto &eng = battle_->engine();
+            const auto &myParty = eng.party(battle_->mySide());
+            uint32_t xp_total = (uint32_t)last_foe_level_ * 8u;
 
-                uint8_t *buf = iemu_sram_data(sram_);
-                if (buf && iemu_sram_size(sram_) >=
-                               DaycareSavPatcher::SAV_MIN_BYTES) {
-                    uint8_t new_level =
-                        DaycareSavPatcher::patchPokemon(buf, 0, lead_dex, xp);
-                    DaycareSavPatcher::fixChecksum(buf);
-                    iemu_sram_mark_dirty(sram_);
-                    daycare_->recordBattleWin(0, xp, new_level);
+            // Detect Gen 2: patchPokemon uses Gen 1 SRAM offsets which
+            // would corrupt a Crystal/Gold/Silver save.
+            const char *romName = gnuboy_rom_name();
+            bool gen2 = romName && (strstr(romName, "CRYSTAL") ||
+                                    strstr(romName, "GOLD") ||
+                                    strstr(romName, "SILVER"));
 
-                    printf_line("%s gained %u XP!",
-                                speciesName(lead_dex), (unsigned)xp);
-                    if (new_level > prev_total_level) {
-                        printf_line("%s reached L%u!",
-                                    speciesName(lead_dex), (unsigned)new_level);
-                    }
+            // Use the explicit participation bitmask (set at battle start
+            // and on every switch-in). Exclude fainted Pokemon (hp == 0).
+            uint8_t participated = battle_participated_;
+            for (uint8_t i = 0; i < myParty.count; ++i) {
+                if ((participated & (1 << i)) && myParty.mons[i].hp == 0)
+                    participated &= ~(1 << i);
+            }
+            uint8_t n_parts = 0;
+            for (uint8_t i = 0; i < myParty.count; ++i)
+                if (participated & (1 << i)) n_parts++;
+            if (n_parts == 0) { n_parts = 1; participated = (1 << myParty.active); }
+            uint32_t xp_each = xp_total / n_parts;
+            if (xp_each == 0) xp_each = 1;
+
+            uint8_t *buf = iemu_sram_data(sram_);
+            bool can_patch_g1 = !gen2 && buf &&
+                             iemu_sram_size(sram_) >= DaycareSavPatcher::SAV_MIN_BYTES;
+            uint8_t *wram = gen2 ? gnuboy_wram_bank1() : nullptr;
+
+            for (uint8_t i = 0; i < myParty.count; ++i) {
+                if (!(participated & (1 << i))) continue;
+                const auto &m = myParty.mons[i];
+                const char *name = m.nickname[0] ? m.nickname
+                                 : (m.species >= 1 && m.species <= 151)
+                                       ? speciesName(m.species) : "???";
+
+                if (can_patch_g1 && m.species >= 1 && m.species <= 151) {
+                    // Gen 1: patch SRAM directly
+                    uint8_t nl = DaycareSavPatcher::patchPokemon(
+                                     buf, i, m.species, xp_each);
+                    printf_line("%s gained %u XP!", name, (unsigned)xp_each);
+                    if (nl > m.level)
+                        printf_line("%s reached L%u!", name, (unsigned)nl);
+                    if (daycare_) daycare_->recordBattleWin(i, xp_each, nl);
+                } else if (gen2 && wram) {
+                    // Gen 2: patch WRAM directly (emulator is paused)
+                    uint8_t nl = DaycareSavPatcher::patchGen2WRAM(
+                                     wram, i, m.species, xp_each);
+                    printf_line("%s gained %u XP!", name, (unsigned)xp_each);
+                    if (nl > m.level)
+                        printf_line("%s reached L%u!", name, (unsigned)nl);
+                    if (daycare_) daycare_->recordBattleWin(i, xp_each, nl);
                 } else {
-                    println("(XP write failed - SRAM unavailable)");
+                    printf_line("%s gained %u XP!", name, (unsigned)xp_each);
+                    if (daycare_) daycare_->recordBattleWin(i, xp_each, 0);
                 }
+            }
+            if (can_patch_g1) {
+                DaycareSavPatcher::fixChecksum(buf);
+                iemu_sram_mark_dirty(sram_);
             }
         }
 
@@ -862,6 +904,8 @@ void MatsuMonsterTerminal::cmdFight(const char *args)
     last_foe_species_    = cpuParty.species[0];
     last_foe_level_      = cpuParty.mons[0].level;
     xp_pending_          = true;
+    battle_participated_ = (1 << 0);  // lead participates
+    battle_prev_active_  = 0;
     battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
 }
@@ -995,6 +1039,8 @@ void MatsuMonsterTerminal::cmdRun()
     last_foe_species_    = cpuSpecies;
     last_foe_level_      = cpuLevel;
     xp_pending_          = true;
+    battle_participated_ = (1 << 0);
+    battle_prev_active_  = 0;
     battle_->startLocal(myParty, cpuParty);
 
     printf_line("A wild %s (L%u) appeared!",
@@ -1230,6 +1276,8 @@ void MatsuMonsterTerminal::cmdGym(const char *args)
     last_foe_species_ = cpuParty.mons[0].species;
     last_foe_level_   = cpuParty.mons[0].level;
     xp_pending_       = true;
+    battle_participated_ = (1 << 0);
+    battle_prev_active_  = 0;
     last_battle_line_[0] = '\0';
     battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
@@ -1282,6 +1330,8 @@ void MatsuMonsterTerminal::cmdE4()
     last_foe_species_ = cpuParty.mons[0].species;
     last_foe_level_   = cpuParty.mons[0].level;
     xp_pending_       = true;
+    battle_participated_ = (1 << 0);
+    battle_prev_active_  = 0;
     last_battle_line_[0] = '\0';
     battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
@@ -2190,8 +2240,18 @@ void MatsuMonsterTerminal::drawIdlePanel(int x, int y, int right)
                 else if (pct <= 50) hp_color = 0xFFFFCC40;
                 else                hp_color = 0xFF60E060;
             }
-            snprintf(buf, sizeof(buf), "   HP %u/%u", (unsigned)hp,
-                     (unsigned)maxHp);
+            uint32_t exp = ((uint32_t)m.exp[0] << 16) |
+                           ((uint32_t)m.exp[1] << 8) | m.exp[2];
+            uint8_t lvl = m.level ? m.level : m.boxLevel;
+            uint32_t nextExp = (m.species >= 1 && m.species <= 251 && lvl < 100)
+                                   ? expForLevel(m.species, lvl + 1) : 0;
+            if (nextExp > 0)
+                snprintf(buf, sizeof(buf), "   HP %u/%u  XP %lu/%lu",
+                         (unsigned)hp, (unsigned)maxHp,
+                         (unsigned long)exp, (unsigned long)nextExp);
+            else
+                snprintf(buf, sizeof(buf), "   HP %u/%u  XP %lu",
+                         (unsigned)hp, (unsigned)maxHp, (unsigned long)exp);
             fast_text_blit(fb_, x, y, buf, hp_color, right);
             y += LINE_PX + 2;
         }

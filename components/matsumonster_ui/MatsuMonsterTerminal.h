@@ -183,6 +183,8 @@ private:
     uint8_t   last_foe_species_ = 0;
     uint8_t   last_foe_level_   = 0;
     bool      xp_pending_       = false;
+    uint8_t   battle_participated_ = 0;  // bitmask: which party slots fought
+    uint8_t   battle_prev_active_  = 0;  // track switches for participation
 
     // LORD game state — persisted to /monstermesh/lord.dat
     LordSave  lord_save_        = {};

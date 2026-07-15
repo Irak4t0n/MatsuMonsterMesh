@@ -9,9 +9,9 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
-## Session Jul 15 2026b — Battle UX fixes for Gen 2 / Crystal (Session 14b)
+## Session Jul 15 2026b — Battle UX + Gen 2 XP system (Session 14b)
 
-Three battle UX bugs found during on-device Crystal testing:
+Battle UX bugs found during on-device Crystal testing, plus full Gen 2 XP:
 
 1. **Foe name showed "WILD"**: `lordPickWildEncounter` set the foe's nickname
    to literal `"WILD"` instead of the species name, so the battle panel showed
@@ -28,6 +28,20 @@ Three battle UX bugs found during on-device Crystal testing:
    accidentally hit ESC. Fixed — `drawBattlePanel` now renders a full party
    list with cursor, HP bars, `[out]` tag on active Pokemon, and
    `W/S=move Enter=ok ESC=cancel` instructions.
+4. **XP payout was silently skipped for Crystal**: auto-checkin ran before
+   WRAM was populated → daycare `partyCount=0` → XP block gated on
+   `partyCount > 0` never executed. Fixed: XP payout now reads the lead
+   species from the battle engine's party data (always valid after exit).
+5. **XP not shared among participants**: only the lead got XP. Fixed:
+   explicit `battle_participated_` bitmask set at battle start + on every
+   switch-in; XP split evenly among surviving participants (fainted excluded).
+6. **Gen 2 XP wasn't persisted**: Gen 1 SRAM patcher can't write Crystal's
+   save format. Added `patchGen2WRAM()` — writes EXP + level directly to
+   the emulator's live WRAM while it's paused. Also extended the growth
+   rate table to cover dex 152-251 so `expForLevel`/`levelForExp` work for
+   all Gen 2 species.
+7. **Party panel XP display**: idle panel now shows `XP current/next` next
+   to HP for each Pokemon (e.g. `HP 25/25  XP 400/525`).
 
 ---
 
