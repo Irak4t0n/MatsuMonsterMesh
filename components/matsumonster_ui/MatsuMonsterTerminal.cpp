@@ -2035,53 +2035,92 @@ void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
     const auto &foe  = fp.mons[fp.active];
 
     char buf[64];
-    snprintf(buf, sizeof(buf), "You: %.10s L%u",
-             me.nickname[0] ? me.nickname : "???", (unsigned)me.level);
-    fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
-    y += LINE_PX;
 
-    uint32_t hp_color = COLOR_TEXT;
-    if (me.maxHp > 0) {
-        uint32_t pct = (uint32_t)me.hp * 100u / me.maxHp;
-        if      (pct <= 25) hp_color = 0xFFFF5050;
-        else if (pct <= 50) hp_color = 0xFFFFCC40;
-        else                hp_color = 0xFF60E060;
-    }
-    snprintf(buf, sizeof(buf), "HP %u/%u", (unsigned)me.hp, (unsigned)me.maxHp);
-    fast_text_blit(fb_, x, y, buf, hp_color, right);
-    y += LINE_PX + 4;
+    // ── WAIT_SWITCH: show party list with cursor ──
+    if (battle_->phase() == MonsterMeshTextBattle::Phase::WAIT_SWITCH) {
+        fast_text_blit(fb_, x, y, "-- SWITCH TO --", COLOR_HEADER, right);
+        y += LINE_PX + 2;
+        uint8_t cur = battle_->switchCursor();
+        for (uint8_t i = 0; i < mp.count; ++i) {
+            const auto &m = mp.mons[i];
+            const char *mark = (i == cur) ? "> " : "  ";
+            const char *tag  = (i == mp.active) ? " [out]" : "";
+            uint32_t col = COLOR_TEXT;
+            if (m.hp == 0) col = COLOR_DIM;
+            else if (i == cur) col = COLOR_INPUT;
+            snprintf(buf, sizeof(buf), "%s%.8s L%u%s",
+                     mark,
+                     m.nickname[0] ? m.nickname : speciesName(m.species),
+                     (unsigned)m.level, tag);
+            fast_text_blit(fb_, x, y, buf, col, right);
+            y += LINE_PX;
+            uint32_t hpc = COLOR_DIM;
+            if (m.hp > 0 && m.maxHp > 0) {
+                uint32_t pct = (uint32_t)m.hp * 100u / m.maxHp;
+                if      (pct <= 25) hpc = 0xFFFF5050;
+                else if (pct <= 50) hpc = 0xFFFFCC40;
+                else                hpc = 0xFF60E060;
+            }
+            snprintf(buf, sizeof(buf), "  HP %u/%u",
+                     (unsigned)m.hp, (unsigned)m.maxHp);
+            fast_text_blit(fb_, x, y, buf, hpc, right);
+            y += LINE_PX;
+        }
+        y += 4;
+        fast_text_blit(fb_, x, y, "W/S=move  Enter=ok", COLOR_PROMPT, right);
+        y += LINE_PX;
+        fast_text_blit(fb_, x, y, "ESC=cancel", COLOR_PROMPT, right);
+        y += LINE_PX + 4;
+    } else {
+        // ── Normal move selection panel ──
+        snprintf(buf, sizeof(buf), "You: %.10s L%u",
+                 me.nickname[0] ? me.nickname : "???", (unsigned)me.level);
+        fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
+        y += LINE_PX;
 
-    for (int i = 0; i < 4; ++i) {
-        if (me.moves[i] == 0) {
-            snprintf(buf, sizeof(buf), "%d) ---", i + 1);
+        uint32_t hp_color = COLOR_TEXT;
+        if (me.maxHp > 0) {
+            uint32_t pct = (uint32_t)me.hp * 100u / me.maxHp;
+            if      (pct <= 25) hp_color = 0xFFFF5050;
+            else if (pct <= 50) hp_color = 0xFFFFCC40;
+            else                hp_color = 0xFF60E060;
+        }
+        snprintf(buf, sizeof(buf), "HP %u/%u", (unsigned)me.hp, (unsigned)me.maxHp);
+        fast_text_blit(fb_, x, y, buf, hp_color, right);
+        y += LINE_PX + 4;
+
+        for (int i = 0; i < 4; ++i) {
+            if (me.moves[i] == 0) {
+                snprintf(buf, sizeof(buf), "%d) ---", i + 1);
+                fast_text_blit(fb_, x, y, buf, COLOR_DIM, right);
+                y += LINE_PX * 2;
+                continue;
+            }
+            const Gen1MoveData *m = gen1Move(me.moves[i]);
+            if (!m) {
+                snprintf(buf, sizeof(buf), "%d) #%u", i + 1, (unsigned)me.moves[i]);
+                fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
+                y += LINE_PX * 2;
+                continue;
+            }
+            uint32_t name_color = (me.pp[i] == 0) ? COLOR_DIM : COLOR_INPUT;
+            snprintf(buf, sizeof(buf), "%d) %.14s", i + 1, m->name);
+            fast_text_blit(fb_, x, y, buf, name_color, right);
+            y += LINE_PX;
+            snprintf(buf, sizeof(buf), "   PP %u/%u",
+                     (unsigned)me.pp[i], (unsigned)m->pp);
             fast_text_blit(fb_, x, y, buf, COLOR_DIM, right);
-            y += LINE_PX * 2;
-            continue;
+            y += LINE_PX;
         }
-        const Gen1MoveData *m = gen1Move(me.moves[i]);
-        if (!m) {
-            snprintf(buf, sizeof(buf), "%d) #%u", i + 1, (unsigned)me.moves[i]);
-            fast_text_blit(fb_, x, y, buf, COLOR_TEXT, right);
-            y += LINE_PX * 2;
-            continue;
-        }
-        uint32_t name_color = (me.pp[i] == 0) ? COLOR_DIM : COLOR_INPUT;
-        snprintf(buf, sizeof(buf), "%d) %.14s", i + 1, m->name);
-        fast_text_blit(fb_, x, y, buf, name_color, right);
-        y += LINE_PX;
-        snprintf(buf, sizeof(buf), "   PP %u/%u",
-                 (unsigned)me.pp[i], (unsigned)m->pp);
-        fast_text_blit(fb_, x, y, buf, COLOR_DIM, right);
-        y += LINE_PX;
-    }
 
-    y += 4;
-    fast_text_blit(fb_, x, y, "S=switch  F=flee", COLOR_PROMPT, right);
-    y += LINE_PX;
-    fast_text_blit(fb_, x, y, "type 'catch' to net", COLOR_PROMPT, right);
-    y += LINE_PX;
-    fast_text_blit(fb_, x, y, "ESC=forfeit", COLOR_PROMPT, right);
-    y += LINE_PX + 4;
+        y += 4;
+        fast_text_blit(fb_, x, y, "S=switch  F=flee", COLOR_PROMPT, right);
+        y += LINE_PX;
+        fast_text_blit(fb_, x, y, "type 'catch' to net", COLOR_PROMPT, right);
+        y += LINE_PX;
+        fast_text_blit(fb_, x, y, "ESC=forfeit", COLOR_PROMPT, right);
+        y += LINE_PX + 4;
+    }
 
     fast_hline(fb_, x, right - 8, y, COLOR_DIM);
     y += 4;

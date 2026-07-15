@@ -6,9 +6,9 @@ This project "MatsuMonsterMesh" combines two things:
 
 Players use LoRa radio to exchange daycare beacons and battle over the mesh — no internet required. The emulator's live SRAM is the source of truth for party data.
 
-## Current State (Session 14)
+## Current State (Session 14b)
 
-Session 14 (Jul 15 2026) — full review vs upstream, see REVIEW_2026-07-15.md:
+Session 14b (Jul 15 2026) — battle UX fixes for Gen 2 / Crystal:
 - DaycareBeacon is now 123 bytes: added `requestResponse` (hollaback) after
   `ngPlusTier`, matching current upstream; RX on both sides tolerates 122
 - `broadcastBeacon` fills `ngPlusTier` from `lordCurrentNgPlusTier()` (was
@@ -27,6 +27,10 @@ Session 14 (Jul 15 2026) — full review vs upstream, see REVIEW_2026-07-15.md:
 - Known upstream gaps (documented, not ported): networked PvP initiation
   (0x66-0x6C server-auth protocol), Gauntlet/mmg (0x70-0x76), Dungeon
   (0x80-0x86), hb command, upstream engine gen=3 default
+- Wild encounter foe panel now shows species name (was "WILD")
+- Gen 2 move fallback: if all 4 moves are Gen 2-only (>165), Struggle assigned
+- WAIT_SWITCH phase now renders a visible party list with cursor in the
+  battle panel (was invisible, eating all input)
 
 ## Previous State (Session 13b)
 

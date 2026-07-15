@@ -1077,6 +1077,13 @@ public:
             g1.dvs[0]    = g2[0x15]; g1.dvs[1]   = g2[0x16];
             g1.pp[0]     = g2[0x17]; g1.pp[1]    = g2[0x18];
             g1.pp[2]     = g2[0x19]; g1.pp[3]    = g2[0x1A];
+            // If ALL moves were Gen 2 (filtered to 0), give Struggle so the
+            // mon can still fight in the Gen 1 battle engine.
+            if (g1.moves[0] == 0 && g1.moves[1] == 0 &&
+                g1.moves[2] == 0 && g1.moves[3] == 0) {
+                g1.moves[0] = 165; // Struggle
+                g1.pp[0]    = 10;
+            }
             g1.level     = g2[0x1F];
             g1.maxHp[0]  = g2[0x24]; g1.maxHp[1] = g2[0x25];
             g1.atk[0]    = g2[0x26]; g1.atk[1]   = g2[0x27];

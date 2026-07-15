@@ -4,6 +4,7 @@
 #include "LordRoutes.h"
 
 #include "Gen1BattleEngine.h"
+#include "DaycareData.h"          // daycareSpeciesNames[]
 #include "showdown_gen1_moves.h"
 
 #include <esp_random.h>
@@ -151,6 +152,8 @@ bool lordPickWildEncounter(uint8_t routeIdx, Gen1Party &out)
         p.pp[i] = m ? m->pp : 0;
     }
     out.species[0] = pick->species;
-    snprintf((char *)out.nicknames[0], 11, "WILD");
+    const char *name = (pick->species >= 1 && pick->species <= 151)
+                           ? daycareSpeciesNames[pick->species] : "???";
+    snprintf((char *)out.nicknames[0], 11, "%s", name);
     return true;
 }

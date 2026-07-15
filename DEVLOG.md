@@ -9,6 +9,28 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session Jul 15 2026b — Battle UX fixes for Gen 2 / Crystal (Session 14b)
+
+Three battle UX bugs found during on-device Crystal testing:
+
+1. **Foe name showed "WILD"**: `lordPickWildEncounter` set the foe's nickname
+   to literal `"WILD"` instead of the species name, so the battle panel showed
+   `Foe: WILD L5` instead of `Foe: Pidgey L5`. Fixed — uses
+   `daycareSpeciesNames[species]` now.
+2. **Gen 2 Pokemon with all Gen 2 moves couldn't fight**: The Gen 1 battle
+   engine filters moves with ID > 165 to 0. Crystal Pokemon whose entire
+   moveset is Gen 2-only ended up with 4 empty move slots, leaving the player
+   unable to attack. Fixed — `buildGen1PartyFromWRAM_Gen2` now assigns Struggle
+   (move 165, PP 10) when all 4 moves are filtered out.
+3. **Switch menu was invisible**: Pressing `S` during battle entered
+   `WAIT_SWITCH` phase, which captured all keyboard input but had no visual
+   representation in the battle panel. Players saw input freeze until they
+   accidentally hit ESC. Fixed — `drawBattlePanel` now renders a full party
+   list with cursor, HP bars, `[out]` tag on active Pokemon, and
+   `W/S=move Enter=ok ESC=cancel` instructions.
+
+---
+
 ## Session Jul 15 2026 — Fable 5 review: beacon parity, AES-256, channel mutex, cred hygiene (Session 14)
 
 Full-codebase review against upstream monster_mesh (fresh clone). Fixes below;

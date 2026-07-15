@@ -77,7 +77,8 @@ in the badge-bsp managed component for the full pin map.
 - Headless Gen 1 battle engine with deterministic dual-side execution
   over a `MeshtasticRadio` abstraction
 - **Gen 2 support**: Pokemon Crystal/Gold/Silver party reading from live
-  WRAM, with automatic Gen 2 move filtering and stat fallbacks
+  WRAM, with automatic Gen 2 move filtering (Struggle fallback when all
+  moves are Gen 2-only) and stat fallbacks
 - Daycare: party check-in/out, hourly events, friendship/rivalry,
   achievements, XP write-back to the running ROM's SRAM — wired to
   the live LoRa radio with auto-beacon on ROM load
