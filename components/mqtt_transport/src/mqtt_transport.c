@@ -36,9 +36,9 @@ static const char *TAG = "mqtt";
 //   nvs_set mm_mqtt user   str "<username>"
 //   nvs_set mm_mqtt pass   str "<password>"
 
-#define MQTT_BROKER_URI   "mqtts://sf17b671.ala.us-east-1.emqxsl.com:8883"
+#define MQTT_BROKER_URI   "mqtts://mqtt.cableclub.net:8883"
 #define MQTT_USERNAME     "ash"
-#define MQTT_PASSWORD     "large4meowth"   // ROTATE ME — this value leaked in git history
+#define MQTT_PASSWORD     "large4meowth"   // matches upstream Default.h
 
 #define MQTT_NVS_NS       "mm_mqtt"
 

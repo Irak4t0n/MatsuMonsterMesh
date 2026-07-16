@@ -6,7 +6,19 @@ This project "MatsuMonsterMesh" combines two things:
 
 Players use LoRa radio to exchange daycare beacons and battle over the mesh — no internet required. The emulator's live SRAM is the source of truth for party data.
 
-## Current State (Session 14b)
+## Current State (Session 15)
+
+Session 15 (Jul 15 2026) — MQTT broker fix + hollaback command:
+- MQTT broker updated: `mqtts://sf17b671...emqxsl.com:8883` changed to
+  `mqtts://mqtt.cableclub.net:8883` matching upstream Default.h; old EMQX
+  serverless instance was defunct, preventing all MonsterMesh channel TX
+- `hb` (hollaback) terminal command: broadcasts beacon with requestResponse=1
+  then dumps current neighbor list; matches upstream `hb` command
+- Known upstream gaps (documented, not ported): networked PvP initiation
+  (0x66-0x6C server-auth protocol), Gauntlet/mmg (0x70-0x76), Dungeon
+  (0x80-0x86), upstream engine gen=3 default
+
+## Previous State (Session 14b)
 
 Session 14b (Jul 15 2026) — battle UX fixes for Gen 2 / Crystal:
 - DaycareBeacon is now 123 bytes: added `requestResponse` (hollaback) after
@@ -22,11 +34,6 @@ Session 14b (Jul 15 2026) — battle UX fixes for Gen 2 / Crystal:
   fallback — ROTATE the old leaked EMQX password
 - Beacon interval 30s debug → 5 min; drain_task stack 4K → 6K
 - RX hex-dump/per-mon logging gated behind MM_WIRE_VERBOSE_RX (default 0)
-- git: untracked build_log*.txt + .claude/settings.local.json; CLAUDE.md
-  un-ignored (rules require committing it)
-- Known upstream gaps (documented, not ported): networked PvP initiation
-  (0x66-0x6C server-auth protocol), Gauntlet/mmg (0x70-0x76), Dungeon
-  (0x80-0x86), hb command, upstream engine gen=3 default
 - Wild encounter foe panel now shows species name (was "WILD")
 - Gen 2 move fallback: if all 4 moves are Gen 2-only (>165), Struggle assigned
 - WAIT_SWITCH phase now renders a visible party list with cursor in the

@@ -692,8 +692,9 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "mesh_send", &args) || starts_with(cmd, "ms", &args)) cmdMeshSend(args);
     else if (starts_with(cmd, "mesh_announce", &args) || starts_with(cmd, "ma", &args)) cmdMeshAnnounce(args);
     else if (starts_with(cmd, "mesh_nodes", &args) || starts_with(cmd, "mn", &args)) cmdMeshNodes();
-    // Daycare / MQTT (short: db, mq)
+    // Daycare / MQTT (short: db, hb, mq)
     else if (starts_with(cmd, "daycare_beacon", &args) || starts_with(cmd, "db", &args)) cmdDaycareBeacon();
+    else if (starts_with(cmd, "hollaback", &args) || starts_with(cmd, "hb", &args)) cmdHollaback();
     else if (starts_with(cmd, "mqtt_status", &args) || starts_with(cmd, "mq", &args)) cmdMqttStatus();
     // Channel commands (short: cl, ca, cd, cs, cr)
     else if (starts_with(cmd, "ch_list", &args) || starts_with(cmd, "cl", &args))    cmdChList();
@@ -735,6 +736,7 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  ma          - broadcast NodeInfo");
     println("  mn          - list known nodes");
     println("  db          - force daycare beacon TX");
+    println("  hb          - hollaback (beacon + neighbors)");
     println("  mq          - MQTT/WiFi status");
     println(" -- Channels --");
     println("  cl          - list channels");
@@ -1659,6 +1661,31 @@ void MatsuMonsterTerminal::cmdDaycareBeacon()
         println("TX FAILED - check lora_stats");
     } else {
         println("TX status unclear - check lora_stats");
+    }
+}
+
+void MatsuMonsterTerminal::cmdHollaback()
+{
+    if (!daycare_) { println("(no daycare wired)"); return; }
+    println("HB!");
+    daycare_->forceBeacon();
+
+    uint8_t nbrCnt = daycare_->getNeighborCount();
+    if (nbrCnt == 0) {
+        println("No neighbors yet - responses will arrive shortly.");
+    } else {
+        printf_line("Neighbors: %u", (unsigned)nbrCnt);
+        const auto *nbrs = daycare_->getNeighbors();
+        for (uint8_t i = 0; i < nbrCnt; ++i) {
+            const char *lead = (nbrs[i].partyCount > 0 && nbrs[i].party[0].species > 0)
+                                   ? speciesName(nbrs[i].party[0].species) : "?";
+            printf_line("  [%s] %s - %s lv%u (%u mon)",
+                        nbrs[i].shortName,
+                        nbrs[i].gameName[0] ? nbrs[i].gameName : "(no name)",
+                        lead,
+                        (unsigned)(nbrs[i].partyCount > 0 ? nbrs[i].party[0].level : 0),
+                        (unsigned)nbrs[i].partyCount);
+        }
     }
 }
 

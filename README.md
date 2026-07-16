@@ -109,7 +109,7 @@ in the badge-bsp managed component for the full pin map.
   (up to 200 chars), message history with word-wrap, side panel showing
   channel list / MQTT status / node count, and in-emulator notification
   overlay with unread message badge
-- **MQTT transport**: WiFi auto-connect, TLS to EMQX broker,
+- **MQTT transport**: WiFi auto-connect, TLS to mqtt.cableclub.net,
   channel-based routing (MonsterMesh channel = MQTT, others = LoRa),
   ServiceEnvelope encoding matching official Meshtastic proto,
   RX injection into LoRa pipeline with hop_limit=0 to prevent relay,

@@ -9,6 +9,20 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
+## Session Jul 15 2026c — MQTT broker fix + hollaback command (Session 15)
+
+1. **MQTT broker was defunct**: MonsterMesh channel TX (chat and beacons) was
+   silently dropped because the EMQX serverless broker
+   (`sf17b671.ala.us-east-1.emqxsl.com`) no longer exists. Upstream moved to
+   `mqtt.cableclub.net:8883` (TLS). Updated broker URI to match; MQTT now
+   connects successfully and MonsterMesh channel messages reach T-Deck peers.
+2. **`hb` (hollaback) command**: broadcasts a daycare beacon with
+   `requestResponse=1` (prompting peers to reply with their own beacon) and
+   immediately dumps the current neighbor list. Matches the upstream `hb`
+   command.
+
+---
+
 ## Session Jul 15 2026b — Battle UX + Gen 2 XP system (Session 14b)
 
 Battle UX bugs found during on-device Crystal testing, plus full Gen 2 XP:
