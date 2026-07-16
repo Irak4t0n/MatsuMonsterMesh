@@ -1,12 +1,144 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 // See MonsterMeshTextBattle.h for description.
 
 #include "MonsterMeshTextBattle.h"
-#include "monster_core_compat.h"
 #include "MeshtasticRadio.h"
+#include "showdown_gen1_moves.h"
+#include "showdown_gen1_basestats.h"
+#include "Gen1Species.h"
+#include "monster_core_compat.h"
+#include "pax_gfx.h"
+#include "pax_fonts.h"
+#include "FastText.h"
+#include "Gen3Front565.h"
+#include "Gen3Back565.h"
+#include "miniz.h"
+#include "esp_log.h"
 #include "esp_random.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+
+static const char *TAG = "tbattle";
+static constexpr uint8_t MM_CHANNEL = 1;
+
+// 24-bit RGB → RGB565 packing for lgfx draw calls.
+static inline uint16_t rgb565(uint32_t c)
+{
+    uint8_t r = (c >> 16) & 0xFF;
+    uint8_t g = (c >> 8)  & 0xFF;
+    uint8_t b =  c        & 0xFF;
+    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+
+// Battle UI uses the fixed GBC-green palette (matching the boot loader and
+// emulator chrome) regardless of the user's selected theme. Keeps the
+// game-feel consistent with the rest of the cart experience.
+//   GBC_0 darkest   GBC_3 dark   GBC_4 mid   GBC_5 light   GBC_6 lightest
+// Gen 1 battle station palette — light background like the actual Game Boy.
+#define BG    rgb565(0xFFFFFF)    // white background
+#define DARK  rgb565(0xD0D0D0)    // selection highlight / panel bg
+#define DIM   rgb565(0x808080)    // disabled/secondary text
+#define ACC   rgb565(0x40C040)    // healthy HP bar green
+#define FG    rgb565(0x000000)    // black text / borders
+
+// ── pax rendering helpers (replace LovyanGFX calls) ──────────────────────────
+
+static inline uint32_t c565to8888(uint16_t c) {
+    uint8_t r5 = (c >> 11) & 0x1F;
+    uint8_t g6 = (c >> 5) & 0x3F;
+    uint8_t b5 = c & 0x1F;
+    return 0xFF000000u | ((uint32_t)(r5 << 3 | r5 >> 2) << 16)
+                       | ((uint32_t)(g6 << 2 | g6 >> 4) << 8)
+                       | (uint32_t)(b5 << 3 | b5 >> 2);
+}
+
+static int s_gfx_cx = 0, s_gfx_cy = 0;
+static uint16_t s_gfx_fg = 0xFFFF;
+
+static void gfx_fillScreen(pax_buf_t *fb, uint16_t c) {
+    pax_background(fb, c565to8888(c));
+}
+static void gfx_fillRect(pax_buf_t *fb, int x, int y, int w, int h, uint16_t c) {
+    pax_draw_rect(fb, c565to8888(c), x, y, w, h);
+}
+static void gfx_drawRect(pax_buf_t *fb, int x, int y, int w, int h, uint16_t c) {
+    uint32_t c32 = c565to8888(c);
+    pax_draw_rect(fb, c32, x, y, w, 1);
+    pax_draw_rect(fb, c32, x, y + h - 1, w, 1);
+    pax_draw_rect(fb, c32, x, y, 1, h);
+    pax_draw_rect(fb, c32, x + w - 1, y, 1, h);
+}
+static void gfx_setCursor(int x, int y) { s_gfx_cx = x; s_gfx_cy = y; }
+static void gfx_setTextColor(uint16_t fg, uint16_t bg = 0) {
+    s_gfx_fg = fg; (void)bg;
+}
+// Battle text size — scale up for 800x480 screen
+static constexpr int BATTLE_FONT_PX = 18;
+
+static void gfx_print(pax_buf_t *fb, const char *s) {
+    if (!fb || !s) return;
+    pax_draw_text(fb, c565to8888(s_gfx_fg), pax_font_sky_mono,
+                  BATTLE_FONT_PX, s_gfx_cx, s_gfx_cy, s);
+    // Advance cursor (sky_mono at 18px is roughly 11px wide per glyph)
+    s_gfx_cx += (int)strlen(s) * (BATTLE_FONT_PX * 6 / 10);
+}
+static void gfx_printf(pax_buf_t *fb, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+static void gfx_printf(pax_buf_t *fb, const char *fmt, ...) {
+    char tmp[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    gfx_print(fb, tmp);
+}
+
+// ── Sprite decompression + rendering ─────────────────────────────────────────
+
+// Decompress a DEFLATE-compressed RGB565 sprite and blit it onto pax_buf_t.
+// Transparent pixel (0xF81F) is replaced with `bgColor`. `scale` = 1 or 2.
+static void renderSprite(pax_buf_t *fb, int dx, int dy,
+                         uint8_t species, bool isBack, uint16_t bgColor565,
+                         int scale = 2)
+{
+    if (!fb || species == 0 || species > 151) return;
+    int w = isBack ? GEN3_BACK_565_W  : GEN3_FRONT_565_W;
+    int h = isBack ? GEN3_BACK_565_H  : GEN3_FRONT_565_H;
+    const uint32_t *offs = isBack ? kGen3Back565Offsets  : kGen3Front565Offsets;
+    const uint8_t  *blob = isBack ? kGen3Back565Deflate  : kGen3Front565Deflate;
+
+    uint32_t start = offs[species], end = offs[species + 1];
+    if (end <= start) return;
+
+    // Decompress raw DEFLATE to RGB565 pixel buffer
+    static uint8_t s_px[GEN3_FRONT_565_W * GEN3_FRONT_565_H * 2]; // 15488 B max
+    size_t destLen = (size_t)(w * h * 2);
+    size_t srcLen  = end - start;
+    size_t result = tinfl_decompress_mem_to_mem(
+        s_px, destLen, blob + start, srcLen,
+        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    if (result == TINFL_DECOMPRESS_MEM_TO_MEM_FAILED) return;
+
+    // Blit RGB565 pixels to pax ARGB8888 framebuffer (with optional 2x scale)
+    uint32_t bgARGB = c565to8888(bgColor565);
+    for (int py = 0; py < h; ++py) {
+        for (int px = 0; px < w; ++px) {
+            int idx = (py * w + px) * 2;
+            uint16_t c = (uint16_t)s_px[idx] | ((uint16_t)s_px[idx + 1] << 8);
+            uint32_t argb = (c == 0xF81F) ? bgARGB : c565to8888(c);
+            if (scale <= 1) {
+                pax_set_pixel(fb, argb, dx + px, dy + py);
+            } else {
+                // 2x scale: each source pixel → 2x2 block
+                int sx = dx + px * scale, sy = dy + py * scale;
+                for (int sy2 = 0; sy2 < scale; ++sy2)
+                    for (int sx2 = 0; sx2 < scale; ++sx2)
+                        pax_set_pixel(fb, argb, sx + sx2, sy + sy2);
+            }
+        }
+    }
+}
 
 // ── Logging glue from engine ────────────────────────────────────────────────
 
@@ -21,95 +153,269 @@ void MonsterMeshTextBattle::appendLog(const char *line)
     snprintf(log_[logHead_], sizeof(log_[logHead_]), "%s", line);
     logHead_ = (logHead_ + 1) % LOG_LINES;
     if (logFill_ < LOG_LINES) logFill_++;
-    scrollPending_++;
+    if (unshippedLogLines_ < LOG_LINES) unshippedLogLines_++;
     dirty_ = true;
-    // Push immediately to whoever's listening (the terminal's scrollback).
-    // Without this hook the caller has to poll visibleLogLines() — and that
-    // path silently drops every intermediate line of a multi-line turn.
-    if (ext_log_cb_) ext_log_cb_(line, ext_log_ctx_);
 }
 
-uint8_t MonsterMeshTextBattle::visibleLogLines(char out[][LOG_WIDTH + 1], uint8_t maxLines) const
+uint8_t MonsterMeshTextBattle::getRecentLog(char *out, size_t outCap,
+                                            uint8_t maxLines) const
 {
-    uint8_t shown = (logFill_ > scrollPending_) ? (uint8_t)(logFill_ - scrollPending_) : 0;
-    if (shown > maxLines) shown = maxLines;
-    for (uint8_t i = 0; i < shown; ++i) {
-        int idx = (logHead_ + LOG_LINES - shown + i) % LOG_LINES;
-        snprintf(out[i], LOG_WIDTH + 1, "%s", log_[idx]);
+    if (!out || outCap == 0) return 0;
+    out[0] = '\0';
+    if (logFill_ == 0) return 0;
+    uint8_t lines = (logFill_ < maxLines) ? logFill_ : maxLines;
+    // Oldest of the kept window: walk back `lines` from logHead_.
+    int start = ((int)logHead_ - (int)lines + (int)LOG_LINES) % (int)LOG_LINES;
+    size_t pos = 0;
+    uint8_t written = 0;
+    for (uint8_t i = 0; i < lines && pos < outCap - 1; ++i) {
+        int idx = (start + i) % LOG_LINES;
+        size_t avail = outCap - 1 - pos;
+        int n = snprintf(out + pos, avail, "%s%s",
+                         (i == 0) ? "" : "\n", log_[idx]);
+        if (n <= 0) break;
+        pos += (size_t)n;
+        ++written;
     }
-    return shown;
+    return written;
 }
 
 // ── Networked initiator ─────────────────────────────────────────────────────
 
 void MonsterMeshTextBattle::startNetworkedAsInitiator(uint32_t remoteId,
-                                                     const Gen1Party &myParty)
+                                                     const Gen1Party &myParty,
+                                                     const Gen1Party &oppParty,
+                                                     uint32_t existingSeed,
+                                                     uint16_t existingSession)
 {
     mode_     = Mode::NETWORKED;
-    phase_    = Phase::WAIT_PARTY;
+    phase_    = Phase::WAIT_REMOTE;
     remoteId_ = remoteId;
-    session_  = (uint16_t)(mm_millis() & 0xFFFF);
-    mySide_   = 0;   // initiator is always side 0
+    // Block move submission until we hear from the peer once. Receiver
+    // sends nothing automatically, so we rely on the LoRa-thread-driven
+    // handlePacket to set this true when ANY in-session packet arrives
+    // (typically the receiver's ACTION for turn 0, or an early HASH).
+    peerReady_ = false;
+    // If the caller (module's sendMmbBattleStart) already broadcast START
+    // with a specific session_id, use it so our outgoing ACTION packets
+    // match what the receiver is filtering on. Otherwise pick a fresh one.
+    session_  = existingSession ? existingSession
+                                : (uint16_t)(mm_millis() & 0xFFFF);
     cursor_   = 0; switchCursor_ = 0;
     pendingRemoteAction_ = false;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
 
-    uint32_t rngSeed = (uint32_t)(esp_random() ^ remoteId ^ session_);
-    pendingRngSeed_ = rngSeed;
-    myParty_ = myParty;
-    memset(&remoteParty_, 0, sizeof(remoteParty_));
-    partyChunksRecv_  = 0;
-    partyChunksTotal_ = 0;
+    // If the caller already broadcast TEXT_BATTLE_START (with this seed),
+    // reuse it and skip the duplicate sendStart below. Otherwise generate
+    // one and emit the start packet ourselves.
+    uint32_t rngSeed = existingSeed
+                         ? existingSeed
+                         : (uint32_t)(esp_random() ^ remoteId ^ session_);
 
-    sendStart(rngSeed, myParty);
-    sendParty();
-    lastSendMs_ = mm_millis();
-    appendLog("Battle started!");
-    appendLog("Exchanging parties...");
+    Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
+    engine_.start(myParty, opp, rngSeed);
+    // Heal both sides to full HP, refill PP from the move table, clear
+    // status. The PARTY_MIN wire format strips current HP / PP / status
+    // because "everyone starts fully healed in mesh PvP", so the
+    // *receiver's* side1 always lands at maxHp. If we leave our own side0
+    // at the SAV's actual (possibly half-played) state, side0 hashes will
+    // diverge from what our opponent sees on their side1 — instant turn-0
+    // desync. Healing both sides locally on both decks keeps the hashes
+    // aligned. Mirrors startLocal's roguelike "clean slate" setup.
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
+
+    if (!existingSeed) sendStart(rngSeed, myParty);
+    ESP_LOGI(TAG, "[MMB] init startNetworked: session=0x%04X seed=0x%08X peer=0x%08X\n",
+                  (unsigned)session_, (unsigned)rngSeed, (unsigned)remoteId);
+    appendLog("Battle ready — waiting for peer…");
     lastRecvMs_ = mm_millis();
+    handleFaints();
+    // Stay in WAIT_PEER_READY until receiver sends TEXT_BATTLE_READY.
+    // handlePacket transitions to WAIT_ACTION when that packet arrives.
+    // A 10s fallback in tick() unblocks in case the peer is an older build.
+    if (engine_.result() == Gen1BattleEngine::Result::ONGOING)
+        phase_ = Phase::WAIT_PEER_READY;
+    peerReadyTimeoutMs_ = mm_millis() + 10000;
     dirty_ = true;
 }
 
 void MonsterMeshTextBattle::startNetworkedAsReceiver(uint32_t remoteId,
                                                      const Gen1Party &myParty,
-                                                     uint32_t rngSeed)
+                                                     uint32_t rngSeed,
+                                                     const Gen1Party &oppParty,
+                                                     uint16_t existingSession)
 {
     mode_     = Mode::NETWORKED;
-    phase_    = Phase::WAIT_PARTY;
+    phase_    = Phase::WAIT_ACTION;
     remoteId_ = remoteId;
-    mySide_   = 1;   // receiver is always side 1
+    // Use the session_id we captured from the incoming START packet so
+    // ACTION packets we emit match the initiator's session filter — and
+    // ACTION packets the initiator sends pass our session filter.
+    session_  = existingSession;
     cursor_   = 0; switchCursor_ = 0;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
 
-    pendingRngSeed_ = rngSeed;
-    myParty_ = myParty;
-    memset(&remoteParty_, 0, sizeof(remoteParty_));
-    partyChunksRecv_  = 0;
-    partyChunksTotal_ = 0;
-
-    sendParty();
-    lastSendMs_ = mm_millis();
+    Gen1Party opp = (oppParty.count > 0) ? oppParty : myParty;
+    engine_.start(myParty, opp, rngSeed);
+    // Same heal/refill as the initiator path — see comment above. Without
+    // this, our own side0 starts at SAV HP while the initiator's side1
+    // (the unpacked PARTY_MIN view of us) is at maxHp, causing a turn-0
+    // hash desync.
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
+    ESP_LOGI(TAG, "[MMB] recv startNetworked: session=0x%04X seed=0x%08X peer=0x%08X\n",
+                  (unsigned)session_, (unsigned)rngSeed, (unsigned)remoteId);
     appendLog("Battle started!");
-    appendLog("Exchanging parties...");
     lastRecvMs_ = mm_millis();
+    // Notify the initiator that our battle station is up. sendReady() is the
+    // explicit signal; sendHash() follows for turn-0 desync detection.
+    // Initiator transitions from WAIT_PEER_READY to WAIT_ACTION on receipt.
+    peerReady_ = true;
+    sendReady();
+    sendHash();
     dirty_ = true;
 }
 
 void MonsterMeshTextBattle::startLocal(const Gen1Party &myParty,
                                        const Gen1Party &cpuParty,
-                                       const char *intro)
+                                       const char *ourTag,
+                                       const char *theirTag)
 {
+    headerOverride_[0] = '\0';
+    endPromptOverride_[0] = '\0';
+    playerWon_ = false;
+    catchAttempted_ = false;
+
     mode_         = Mode::LOCAL_ROGUELIKE;
     phase_        = Phase::WAIT_ACTION;
     remoteId_     = 0;
-    mySide_       = 0;
     cursor_       = 0; switchCursor_ = 0;
     fleeAttempts_ = 0;
     logFill_ = logHead_ = 0; scrollPending_ = 0;
+    // Start with the lead pokemon as the only participant; trainer-battle
+    // multiplier matches Gen 1 (1.5× wild) since LOCAL_ROGUELIKE is always
+    // a trainer/gym/E4 fight or a single wild explore — wild routes flip
+    // this off below.
+    participantMask_  = 0x01;
+    lastPlayerActive_ = 0;
+    lastEnemyActive_  = 0;
+    isTrainerBattle_  = true;
+    pendingXpDrops_   = 0;
+    for (uint8_t i = 0; i < 6; ++i) {
+        pendingXpPerSlot_[i] = 0;
+        slotXpAccum_[i]      = 0;
+    }
 
     uint32_t rngSeed = (uint32_t)(mm_millis() ^ esp_random());
     engine_.start(myParty, cpuParty, rngSeed);
-    appendLog(intro ? intro : "A wild battle begins!");
+
+    // Tag only the opponent's nicknames (side 1) so log messages like
+    // "BROK-MEW used Tackle" disambiguate a mirror match. Our own pokemon
+    // (side 0) keep their plain nicknames — the switch menu needs the room
+    // and the user already knows it's their team. ourTag is unused here but
+    // kept in the API for future networked-PvP work.
+    (void)ourTag;
+    strncpy(oppTag_, theirTag && theirTag[0] ? theirTag : "", sizeof(oppTag_) - 1);
+    oppTag_[sizeof(oppTag_) - 1] = '\0';
+    if (theirTag && theirTag[0]) {
+        auto &p = engine_.party(1);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            char tmp[11] = {};
+            snprintf(tmp, sizeof(tmp), "%.4s-%.5s", theirTag, p.mons[i].nickname);
+            memcpy(p.mons[i].nickname, tmp, sizeof(p.mons[i].nickname));
+            p.mons[i].nickname[10] = '\0';
+        }
+    }
+
+    // Roguelike-style fight: heal everyone to full and refresh PP. The SAV
+    // values may be a half-played in-game state, so this gives both sides a
+    // clean slate so the fight is actually playable from the move menu.
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
+    appendLog("A wild battle begins!");
+    dirty_ = true;
+}
+
+void MonsterMeshTextBattle::healPlayer()
+{
+    // HP + status only. PP carries over between gym members so the
+    // ladder still demands move management — Pokemon canon: only the
+    // Pokemon Center (post-gym) restores PP.
+    auto &p = engine_.party(0);
+    for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+        auto &m = p.mons[i];
+        m.hp     = m.maxHp;
+        m.status = 0;
+    }
+    appendLog("HP restored.");
+    dirty_ = true;
+}
+
+void MonsterMeshTextBattle::nextOpponent(const Gen1Party &cpu, const char *theirTag)
+{
+    // Caller has just observed isActive()==false (because exit() ran on the
+    // result screen). Bring the battle back to life — mode and phase reset
+    // so the engine and tick loop both consider us in-battle again.
+    mode_ = Mode::LOCAL_ROGUELIKE;
+    engine_.replaceOpponent(cpu);
+    strncpy(oppTag_, theirTag && theirTag[0] ? theirTag : "", sizeof(oppTag_) - 1);
+    oppTag_[sizeof(oppTag_) - 1] = '\0';
+    // Re-tag opponent's nicknames with the new trainer prefix.
+    if (theirTag && theirTag[0]) {
+        auto &p = engine_.party(1);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            char tmp[11] = {};
+            snprintf(tmp, sizeof(tmp), "%.4s-%.5s", theirTag, p.mons[i].nickname);
+            memcpy(p.mons[i].nickname, tmp, sizeof(p.mons[i].nickname));
+            p.mons[i].nickname[10] = '\0';
+        }
+    }
+    // Heal opponent + refresh PP (player keeps their state, gauntlet rule).
+    auto &op = engine_.party(1);
+    for (uint8_t i = 0; i < op.count && i < 6; ++i) {
+        auto &m = op.mons[i];
+        m.hp     = m.maxHp;
+        m.status = 0;
+        for (uint8_t s = 0; s < 4; ++s) {
+            const Gen1MoveData *mv = gen1Move(m.moves[s]);
+            m.pp[s] = mv ? mv->pp : 0;
+        }
+    }
+    phase_ = Phase::WAIT_ACTION;
+    pendingRemoteAction_ = false;
+    cursor_ = 0; switchCursor_ = 0;
+    appendLog("Next trainer steps up!");
     dirty_ = true;
 }
 
@@ -117,14 +423,85 @@ void MonsterMeshTextBattle::exit()
 {
     mode_ = Mode::OFF;
     phase_ = Phase::IDLE;
+    role_  = Role::LEGACY;
+    awaitingAccept_ = false;
+    awaitingFirstUpdate_   = false;
+    awaitingUpdateSinceMs_ = 0;
+    unackedUpdate_   = false;
+    pendingKeyExit_  = false;
+    finishedAtMs_    = 0;
+    challengeTries_  = 0;
+    clientActionType_ = 0xFF;
+    clientTurn_ = 0;
+    clientNeedsFullState_ = false;
+    unshippedLogLines_ = 0;
+    preAcceptUpdateLen_ = 0;
     dirty_ = true;
+}
+
+// ── Server-authoritative initiator entry point ──────────────────────────────
+//
+// Stages our party + name, picks a session id, and broadcasts CHALLENGE.
+// The engine is NOT started here — it waits for the client's ACCEPT (in
+// serverAuthOnAcceptPkt), which carries the client's party. Until ACCEPT
+// arrives (or 3 retries expire), no battle UI exists; we just sit in
+// awaitingAccept_ and the tick() loop retransmits.
+void MonsterMeshTextBattle::startServerAuthAsInitiator(uint32_t remoteId,
+                                                       const Gen1Party &myParty,
+                                                       const char *myName)
+{
+    playerWon_ = false;
+    mode_     = Mode::NETWORKED;
+    phase_    = Phase::WAIT_REMOTE;   // "waiting for opponent to accept"
+    role_     = Role::SERVER;
+    remoteId_ = remoteId;
+    session_  = (uint16_t)((mm_millis() ^ remoteId) & 0xFFFF);
+    cursor_   = 0; switchCursor_ = 0;
+    pendingRemoteAction_ = false;
+    logFill_ = logHead_ = 0; scrollPending_ = 0;
+    peerReady_ = false;
+    awaitingAccept_ = true;
+    challengeTries_ = 0;
+    lastChallengeMs_ = 0;
+    unackedUpdate_  = false;
+    updateSeq_      = 0;
+    lastUpdateLen_  = 0;
+    clientActionType_      = 0xFF;
+    lastAppliedUpdateSeq_  = 0;
+    clientNeedsFullState_  = false;
+
+    pendingMyParty_ = myParty;
+    myTbName_[0] = '\0';
+    if (myName && *myName) {
+        snprintf(myTbName_, sizeof(myTbName_), "%.*s",
+                 (int)TB_MAX_NAME_LEN, myName);
+    }
+    peerTbName_[0] = '\0';
+
+    // P2.34: pre-load engine with our own party in both slots so the
+    // battle station shows the player's pokemon while waiting for
+    // ACCEPT. We then zero opponent count so the foe panel renders
+    // "---" (placeholder). ACCEPT handler re-calls engine_.start()
+    // with the real opponent party + real seed, replacing this stub.
+    engine_.start(myParty, myParty, /*rngSeed*/ 0xCAFEBABE);
+    engine_.party(1).count = 0;
+
+    appendLog("Sending challenge…");
+    ESP_LOGI(TAG, "[MMB] startServerAuthAsInitiator: pre-sendChallenge\n");
+    serverAuthSendChallenge();          // first burst
+    ESP_LOGI(TAG, "[MMB] startServerAuthAsInitiator: post-sendChallenge\n");
+    lastRecvMs_ = mm_millis();
+    dirty_ = true;
+    ESP_LOGI(TAG, "[MMB] server-auth CHALLENGE → 0x%08X session=0x%04X "
+                  "name=%s count=%u\n",
+                  (unsigned)remoteId, (unsigned)session_,
+                  myTbName_, (unsigned)myParty.count);
 }
 
 // ── Wire packet emit/receive ────────────────────────────────────────────────
 
 void MonsterMeshTextBattle::sendStart(uint32_t rngSeed, const Gen1Party &myParty)
 {
-    if (!radio_) return;
     uint8_t buf[BATTLELINK_MAX_PKT];
     BattlePacket *pkt = (BattlePacket *)buf;
     memset(buf, 0, sizeof(buf));
@@ -142,65 +519,40 @@ void MonsterMeshTextBattle::sendStart(uint32_t rngSeed, const Gen1Party &myParty
     radio_->sendPacket(remoteId_, MM_CHANNEL, buf, BATTLELINK_HDR_SIZE + 14);
 }
 
-void MonsterMeshTextBattle::sendParty()
+// Internal: send an ACTION packet with an explicit turn number. Used by
+// the public sendAction for live submissions (turn = current) and by the
+// stale-ACTION recovery path in handlePacket for catch-up replays
+// (turn = the past turn the peer is still waiting on).
+static void sendActionPacket(MeshtasticRadio *radio, uint32_t remoteId,
+                             uint16_t session, uint16_t turn,
+                             uint8_t actionType, uint8_t index)
 {
-    if (!radio_) return;
-    const uint8_t *raw = reinterpret_cast<const uint8_t *>(&myParty_);
-    size_t total = sizeof(Gen1Party);
-    uint8_t nChunks = (uint8_t)((total + PARTY_CHUNK_DATA - 1) / PARTY_CHUNK_DATA);
-
-    for (uint8_t i = 0; i < nChunks; ++i) {
-        uint8_t buf[BATTLELINK_MAX_PKT];
-        BattlePacket *pkt = (BattlePacket *)buf;
-        memset(buf, 0, sizeof(buf));
-        pkt->type = (uint8_t)PktType::TEXT_BATTLE_PARTY;
-        pkt->setSessionId(session_);
-        pkt->seq = i;
-        pkt->payload[0] = i;        // partIdx
-        pkt->payload[1] = nChunks;  // partTotal
-
-        size_t offset = (size_t)i * PARTY_CHUNK_DATA;
-        size_t chunkLen = (offset + PARTY_CHUNK_DATA <= total)
-                              ? PARTY_CHUNK_DATA : (total - offset);
-        memcpy(pkt->payload + 2, raw + offset, chunkLen);
-        radio_->sendPacket(remoteId_, MM_CHANNEL, buf,
-                           BATTLELINK_HDR_SIZE + 2 + (uint8_t)chunkLen);
-    }
-}
-
-void MonsterMeshTextBattle::onPartyComplete()
-{
-    // Both engines must have identical side assignments:
-    // side 0 = initiator's party, side 1 = receiver's party.
-    if (mySide_ == 0)
-        engine_.start(myParty_, remoteParty_, pendingRngSeed_);
-    else
-        engine_.start(remoteParty_, myParty_, pendingRngSeed_);
-
-    appendLog("Opponent party received!");
-    handleFaints();
-    if (engine_.result() == Gen1BattleEngine::Result::ONGOING)
-        phase_ = Phase::WAIT_ACTION;
-    else
-        phase_ = Phase::FINISHED;
-    dirty_ = true;
-}
-
-void MonsterMeshTextBattle::sendAction(uint8_t actionType, uint8_t index)
-{
-    if (!radio_) return;
+    if (!radio) return;
     uint8_t buf[BATTLELINK_MAX_PKT];
     BattlePacket *pkt = (BattlePacket *)buf;
     memset(buf, 0, sizeof(buf));
     pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACTION;
-    pkt->setSessionId(session_);
-    pkt->seq  = engine_.turn() & 0xFF;
-    uint16_t turn = engine_.turn();
+    pkt->setSessionId(session);
+    pkt->seq  = turn & 0xFF;
     pkt->payload[0] = (turn >> 8) & 0xFF;
     pkt->payload[1] =  turn       & 0xFF;
     pkt->payload[2] = actionType;
     pkt->payload[3] = index;
-    radio_->sendPacket(remoteId_, MM_CHANNEL, buf, BATTLELINK_HDR_SIZE + 4);
+    radio->sendPacket(remoteId, MM_CHANNEL, buf, BATTLELINK_HDR_SIZE + 4);
+}
+
+void MonsterMeshTextBattle::sendAction(uint8_t actionType, uint8_t index)
+{
+    uint16_t turn = engine_.turn();
+    // Demote lastSent* to prevSent* before overwriting. The peer-catch-up
+    // path in handlePacket needs the action we submitted for a turn we've
+    // already advanced past.
+    if (lastSentAction_ != 0xFF) {
+        prevSentAction_ = lastSentAction_;
+        prevSentIndex_  = lastSentIndex_;
+        prevSentTurn_   = lastSentTurn_;
+    }
+    sendActionPacket(radio_, remoteId_, session_, turn, actionType, index);
     lastSentAction_ = actionType;
     lastSentIndex_  = index;
     lastSentTurn_   = turn;
@@ -209,7 +561,6 @@ void MonsterMeshTextBattle::sendAction(uint8_t actionType, uint8_t index)
 
 void MonsterMeshTextBattle::sendForfeit()
 {
-    if (!radio_) return;
     uint8_t buf[BATTLELINK_HDR_SIZE];
     BattlePacket *pkt = (BattlePacket *)buf;
     pkt->type = (uint8_t)PktType::TEXT_BATTLE_FORFEIT;
@@ -218,9 +569,18 @@ void MonsterMeshTextBattle::sendForfeit()
     radio_->sendPacket(remoteId_, MM_CHANNEL, buf, sizeof(buf));
 }
 
+void MonsterMeshTextBattle::sendReady()
+{
+    uint8_t buf[BATTLELINK_HDR_SIZE];
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_READY;
+    pkt->setSessionId(session_);
+    pkt->seq = 0;
+    radio_->sendPacket(remoteId_, MM_CHANNEL, buf, sizeof(buf));
+}
+
 void MonsterMeshTextBattle::sendHash()
 {
-    if (!radio_) return;
     uint8_t buf[BATTLELINK_MAX_PKT];
     BattlePacket *pkt = (BattlePacket *)buf;
     memset(buf, 0, sizeof(buf));
@@ -240,74 +600,211 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
     if (len < BATTLELINK_HDR_SIZE) return false;
     const BattlePacket *pkt = (const BattlePacket *)buf;
     PktType t = (PktType)pkt->type;
+    ESP_LOGI(TAG, "[MMB] handlePacket type=0x%02X from=0x%08X len=%u mode=%d role=%d\n",
+                  (unsigned)pkt->type, (unsigned)fromId, (unsigned)len,
+                  (int)mode_, (int)role_);
+
+    // ── Server-auth dispatch (must precede the mode_/session checks since
+    // CHALLENGE arrives when mode_ == OFF and ACCEPT/ACTION_V2 may carry
+    // session ids unknown to the legacy session_ field). ─────────────────
+    if (t == PktType::TEXT_BATTLE_CHALLENGE) {
+        if (mode_ != Mode::OFF) return true;  // busy
+        clientAuthOnChallengePkt(fromId, buf, len);
+        return true;
+    }
+    if (mode_ != Mode::OFF && role_ == Role::SERVER) {
+        if (t == PktType::TEXT_BATTLE_ACCEPT) {
+            serverAuthOnAcceptPkt(fromId, buf, len);
+            return true;
+        }
+        if (t == PktType::TEXT_BATTLE_ACTION_V2) {
+            serverAuthOnActionV2Pkt(fromId, buf, len);
+            return true;
+        }
+        if (t == PktType::TEXT_BATTLE_STATE_REQUEST) {
+            serverAuthOnStateRequestPkt(fromId, buf, len);
+            return true;
+        }
+    }
+    if (mode_ != Mode::OFF && role_ == Role::CLIENT) {
+        if (t == PktType::TEXT_BATTLE_UPDATE) {
+            clientAuthOnUpdatePkt(buf, len);
+            return true;
+        }
+        if (t == PktType::TEXT_BATTLE_FULL_STATE) {
+            clientAuthOnFullStatePkt(buf, len);
+            return true;
+        }
+    }
 
     if (t == PktType::TEXT_BATTLE_START) {
         if (mode_ != Mode::OFF) return true;  // already in a battle, ignore
         if (len < BATTLELINK_HDR_SIZE + 14) return true;
-        uint32_t rngSeed = ((uint32_t)pkt->payload[0] << 24)
-                         | ((uint32_t)pkt->payload[1] << 16)
-                         | ((uint32_t)pkt->payload[2] <<  8)
-                         |  (uint32_t)pkt->payload[3];
-        // Auto-accept if we have a party supplier callback.
-        if (party_cb_) {
-            Gen1Party myParty;
-            if (party_cb_(&myParty, party_ctx_)) {
-                session_ = pkt->sessionId();
-                startNetworkedAsReceiver(fromId, myParty, rngSeed);
-                return true;
-            }
-        }
-        // Fallback: record session so the terminal can call
-        // startNetworkedAsReceiver() manually.
+        uint32_t seed = ((uint32_t)pkt->payload[0] << 24) |
+                        ((uint32_t)pkt->payload[1] << 16) |
+                        ((uint32_t)pkt->payload[2] << 8)  |
+                                  pkt->payload[3];
+        // Caller is responsible for supplying our party — we expose a separate
+        // entry point. This packet path is for *unsolicited* battles where the
+        // caller already loaded our party into a globally-known place. For now,
+        // log and let MonsterMeshModule wire up the party.
         session_  = pkt->sessionId();
         remoteId_ = fromId;
+        // Store seed in remoteId_ via a side channel? Cleaner: signal via a
+        // pending-incoming flag the module checks. Out of scope here — the
+        // module calls startNetworkedAsReceiver() with the right party.
         return true;
     }
     if (mode_ == Mode::OFF) return false;
-    if (pkt->sessionId() != session_) return false;
+    if (pkt->sessionId() != session_) {
+        // Silent drop has bitten us in PvP debugging — log the mismatch
+        // so a stuck-waiting-for-opponent state is decodable.
+        ESP_LOGI(TAG, "[MMB] pkt session mismatch from=0x%08X type=0x%02X "
+                      "pkt_session=0x%04X our_session=0x%04X — dropping\n",
+                      (unsigned)fromId, (unsigned)pkt->type,
+                      (unsigned)pkt->sessionId(), (unsigned)session_);
+        return false;
+    }
+    // Forward-port of b402: reject our own packets bounced back via the
+    // MQTT bridge. The broker delivers to all subscribers including the
+    // publisher, so each ACTION/HASH/FORFEIT we transmit comes back to us
+    // with from=our_nodeId. Without this filter the engine treats the echo
+    // as the opponent's submission and overwrites side 1 with our own move
+    // — silent desync that the hash check only catches several turns later
+    // once one deck's accumulated state diverges from the mirror.
+    if (remoteId_ != 0 && fromId != remoteId_) {
+        return false;
+    }
+    // First in-session packet from the peer proves their battle station is
+    // up — unblock initiator move submission. Receiver path leaves this
+    // false until it sees the initiator's own packets, which is fine
+    // because the receiver only enters the battle AFTER receiving START
+    // so it implicitly knows the initiator is ready.
+    if (!peerReady_) {
+        peerReady_ = true;
+        if (phase_ == Phase::WAIT_PEER_READY) {
+            phase_ = Phase::WAIT_ACTION;
+            appendLog("Opponent ready!");
+        } else {
+            appendLog("Opponent ready — go!");
+        }
+        dirty_ = true;
+    }
+
+    // Explicit ready ping from receiver — same effect as first peerReady_.
+    if (t == PktType::TEXT_BATTLE_READY) return true;
 
     switch (t) {
-        case PktType::TEXT_BATTLE_PARTY: {
-            if (phase_ != Phase::WAIT_PARTY) return true;
-            if (len < BATTLELINK_HDR_SIZE + 2) return true;
-            uint8_t idx   = pkt->payload[0];
-            uint8_t total = pkt->payload[1];
-            if (total == 0 || total > 8 || idx >= total) return true;
-            partyChunksTotal_ = total;
-            size_t dataLen = len - BATTLELINK_HDR_SIZE - 2;
-            size_t offset  = (size_t)idx * PARTY_CHUNK_DATA;
-            if (offset + dataLen > sizeof(Gen1Party)) return true;
-            memcpy(reinterpret_cast<uint8_t *>(&remoteParty_) + offset,
-                   pkt->payload + 2, dataLen);
-            partyChunksRecv_ |= (1u << idx);
-            lastRecvMs_ = mm_millis();
-            // All chunks arrived?
-            uint8_t mask = (uint8_t)((1u << total) - 1);
-            if ((partyChunksRecv_ & mask) == mask)
-                onPartyComplete();
-            return true;
-        }
         case PktType::TEXT_BATTLE_ACTION: {
             if (len < BATTLELINK_HDR_SIZE + 4) return true;
             uint16_t turn = ((uint16_t)pkt->payload[0] << 8) | pkt->payload[1];
-            if (turn != engine_.turn()) return true;  // stale or future packet
+            if (turn != engine_.turn()) {
+                // Peer is behind us — we already resolved turn `turn` and
+                // moved on. Their ACTION packet for that turn must have
+                // crossed paths with our own packet that they're still
+                // waiting on (asymmetric loss). Replay our action for
+                // THAT turn so they can finish executing it. Check both
+                // lastSent (the most recent submission) and prevSent (one
+                // turn back) — after a resolveTurn on our side that
+                // crossed a turn boundary, lastSent now holds the action
+                // for the JUST-PASSED turn the peer is stuck on. Without
+                // this, the peer sits at "Waiting for opponent…" until
+                // the 60s forfeit timer fires.
+                if (turn < engine_.turn()) {
+                    uint8_t replayAct = 0xFF, replayIdx = 0;
+                    if (lastSentAction_ != 0xFF && lastSentTurn_ == turn) {
+                        replayAct = lastSentAction_;
+                        replayIdx = lastSentIndex_;
+                    } else if (prevSentAction_ != 0xFF && prevSentTurn_ == turn) {
+                        replayAct = prevSentAction_;
+                        replayIdx = prevSentIndex_;
+                    }
+                    if (replayAct != 0xFF) {
+                        ESP_LOGI(TAG, "[MMB] peer behind: replaying our turn-%u "
+                                      "action (act=%u idx=%u) — they're stuck "
+                                      "waiting on us\n",
+                                      (unsigned)turn,
+                                      (unsigned)replayAct,
+                                      (unsigned)replayIdx);
+                        sendActionPacket(radio_, remoteId_, session_, turn,
+                                         replayAct, replayIdx);
+                    } else {
+                        ESP_LOGI(TAG, "[MMB] peer too far behind: pktTurn=%u "
+                                      "myTurn=%u (no history)\n",
+                                      (unsigned)turn,
+                                      (unsigned)engine_.turn());
+                    }
+                } else {
+                    // Peer is ahead — we're missing their action(s) for our
+                    // current turn. The retry loop in tick() will keep
+                    // re-broadcasting our own action so eventually the peer
+                    // re-replies (this same path on their side) and we
+                    // catch up. Just log so the gap is visible.
+                    ESP_LOGI(TAG, "[MMB] peer ahead: pktTurn=%u myTurn=%u "
+                                  "— waiting for retransmit\n",
+                                  (unsigned)turn, (unsigned)engine_.turn());
+                }
+                lastRecvMs_ = mm_millis();
+                return true;
+            }
             uint8_t act = pkt->payload[2];
             uint8_t idx = pkt->payload[3];
-            engine_.submitAction(1 - mySide_, act, idx);
+            engine_.submitAction(1, act, idx);
             pendingRemoteAction_ = true;
             lastRecvMs_ = mm_millis();
             return true;
         }
         case PktType::TEXT_BATTLE_FORFEIT:
-            engine_.forfeit(1 - mySide_, engineLogCb, this);
+            engine_.forfeit(1, engineLogCb, this);
             phase_ = Phase::FINISHED;
             return true;
         case PktType::TEXT_BATTLE_HASH: {
             if (len < BATTLELINK_HDR_SIZE + 10) return true;
+            uint16_t pktTurn = ((uint16_t)pkt->payload[0] << 8) | pkt->payload[1];
+            // Drop hashes from a different turn than we're currently at.
+            // The hash includes the turn counter, so comparing a peer's
+            // turn-N hash against our (advanced) turn-N+k local state
+            // would false-positive as a desync. The protocol resends a
+            // hash every HASH_INTERVAL turns, so dropping one stale one
+            // is harmless — the next aligned hash will catch any real
+            // divergence. Observed live: turn race between the two decks
+            // (peer's hash arrives after we've already advanced past
+            // that turn over MQTT).
+            if (pktTurn != engine_.turn()) return true;
             uint8_t mine[8]; engine_.hashState(mine);
-            if (memcmp(mine, pkt->payload + 2, 8) != 0) {
-                appendLog("Desync detected - match aborted.");
-                engine_.forfeit(mySide_, engineLogCb, this);
+            const uint8_t *theirs = pkt->payload + 2;
+            if (memcmp(mine, theirs, 8) != 0) {
+                // Diagnostic log so future desyncs are decodable: show both
+                // hashes + the turn the peer's hash was computed at vs our
+                // current turn. Use Serial directly (not LOG_INFO) to keep
+                // the line easy to grep for.
+                ESP_LOGI(TAG, "[MMB] DESYNC hash mismatch peerTurn=%u myTurn=%u "
+                              "mine=%02x%02x%02x%02x%02x%02x%02x%02x "
+                              "theirs=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                              (unsigned)pktTurn, (unsigned)engine_.turn(),
+                              mine[0], mine[1], mine[2], mine[3],
+                              mine[4], mine[5], mine[6], mine[7],
+                              theirs[0], theirs[1], theirs[2], theirs[3],
+                              theirs[4], theirs[5], theirs[6], theirs[7]);
+                // Also dump the per-side state so we can see WHICH fields
+                // diverged. p0/p1 are local labels — initiator/receiver
+                // have these flipped, but the dump lets us see absolute
+                // HP/PP/status/active values to compare both decks.
+                for (int s = 0; s < 2; ++s) {
+                    const auto &party = engine_.party(s);
+                    ESP_LOGI(TAG, "[MMB]  side%d active=%u count=%u:",
+                                  s, (unsigned)party.active,
+                                  (unsigned)party.count);
+                    for (uint8_t i = 0; i < party.count && i < 6; ++i) {
+                        const auto &m = party.mons[i];
+                        ESP_LOGI(TAG, " m%u(sp=%u hp=%u/%u st=%02x pp=%u,%u,%u,%u)",
+                                      i, m.species, m.hp, m.maxHp, m.status,
+                                      m.pp[0], m.pp[1], m.pp[2], m.pp[3]);
+                    }
+                    ESP_LOGI(TAG, "%s", );
+                }
+                appendLog("Desync detected — match aborted.");
+                engine_.forfeit(0, engineLogCb, this);
                 phase_ = Phase::FINISHED;
             }
             return true;
@@ -321,47 +818,157 @@ bool MonsterMeshTextBattle::handlePacket(uint32_t fromId,
 
 void MonsterMeshTextBattle::resolveTurn()
 {
+    // Snapshot opponent HPs so we can credit per-faint XP after executeTurn.
+    {
+        const auto &p1 = engine_.party(1);
+        for (uint8_t i = 0; i < 6; ++i) {
+            lastEnemyHp_[i] = (i < p1.count) ? p1.mons[i].hp : 0;
+        }
+    }
+
     engine_.executeTurn(engineLogCb, this);
     handleFaints();
 
-    // Damage emission: the engine applies HP changes silently (upstream
-    // rendered HP bars on screen). Without those, every neutral non-crit hit
-    // looks like nothing happened — even though the CPU did move and damage
-    // was dealt. Print a per-turn HP line so the user can see turn outcomes.
-    {
-        const auto &pMe  = engine_.party(mySide_);
-        const auto &pFoe = engine_.party(1 - mySide_);
-        const auto &mMe  = pMe.mons[pMe.active];
-        const auto &mFoe = pFoe.mons[pFoe.active];
-        char buf[96];
-        snprintf(buf, sizeof(buf),
-                 "HP: %.7s %u/%u  vs  %.7s %u/%u",
-                 mMe.nickname[0] ? mMe.nickname : "you",
-                 (unsigned)mMe.hp, (unsigned)mMe.maxHp,
-                 mFoe.nickname[0] ? mFoe.nickname : "foe",
-                 (unsigned)mFoe.hp, (unsigned)mFoe.maxHp);
-        appendLog(buf);
+    // Per-faint XP using the Gen 1 formula:
+    //     xp = (baseYield * level * a) / (7 * participants)
+    //   where a = 1.5 for trainer, 1.0 for wild. baseYield approximated as
+    //   sum-of-base-stats / 3 — lands within ~20% of real Gen 1 base
+    //   yields (Lapras 150 vs real 219, Mewtwo 196 vs real 220, Geodude 90
+    //   vs real 73, Caterpie 58 vs real 53). Trainer's 1.5 stays as ×3/×2
+    //   to keep integer math.
+    const auto &p1 = engine_.party(1);
+    for (uint8_t i = 0; i < p1.count && i < 6; ++i) {
+        if (lastEnemyHp_[i] > 0 && p1.mons[i].hp == 0) {
+            uint8_t pcount = (uint8_t)__builtin_popcount(participantMask_);
+            if (pcount == 0) pcount = 1;
+            uint32_t lvl = p1.mons[i].level ? p1.mons[i].level : 1;
+            uint8_t  dex = p1.mons[i].species;
+            const Gen1BaseStats &b =
+                GEN1_BASE_STATS[dex < 152 ? dex : 0];
+            uint32_t baseYield = (uint32_t)(b.hp + b.atk + b.def + b.spd + b.spc) / 3;
+            if (baseYield < 20) baseYield = 20;
+            uint32_t numerMult = isTrainerBattle_ ? 3u : 2u;  // 1.5 vs 1.0
+            uint32_t xpThisFaint =
+                (baseYield * lvl * numerMult) / (uint32_t)(14u * pcount);
+            if (xpThisFaint == 0) xpThisFaint = 1;
+            pendingXpDrops_++;
+            char line[40];
+            snprintf(line, sizeof(line), "Each earned %u XP!",
+                     (unsigned)xpThisFaint);
+            appendLog(line);
+            // Per-participant credit: each participant slot's pending XP
+            // gets the full xpThisFaint (already pre-divided by participant
+            // count). Drains per-slot via consumePendingXp so the saved
+            // party doesn't get re-split across all 6 mons.
+            const auto &p0 = engine_.party(0);
+            for (uint8_t s = 0; s < p0.count && s < 6; ++s) {
+                if (!(participantMask_ & (1u << s))) continue;
+                if (p0.mons[s].hp == 0) continue;   // fainted, no XP
+                pendingXpPerSlot_[s] += xpThisFaint;
+                slotXpAccum_[s]      += xpThisFaint;
+                while (true) {
+                    uint8_t curLvl = engine_.party(0).mons[s].level;
+                    if (curLvl >= 100) break;
+                    uint32_t threshold =
+                        3u * (uint32_t)curLvl * curLvl +
+                        3u * (uint32_t)curLvl + 1u;
+                    if (slotXpAccum_[s] < threshold) break;
+                    slotXpAccum_[s] -= threshold;
+                    inBattleLevelUp(s);
+                }
+            }
+            // New enemy will switch in via autoReplace; reset participant
+            // mask to just whichever player slot is currently active so the
+            // next defeat only shares with mons that were actually present
+            // for that fight.
+            participantMask_ = (uint8_t)(1u << engine_.party(0).active);
+            lastEnemyActive_ = engine_.party(1).active;
+        }
+    }
+
+    // Player-active changes (switch or auto-replace) accumulate into the
+    // participant mask for the current enemy's life span. The move cursor
+    // also snaps back to slot 0 — keeping the last-pick "spam K" UX is
+    // nice for the same pokemon but pointless after a faint, where slot 0
+    // is the natural starting position for the new mon.
+    uint8_t curPlayerActive = engine_.party(0).active;
+    if (curPlayerActive != lastPlayerActive_) {
+        participantMask_ |= (uint8_t)(1u << curPlayerActive);
+        lastPlayerActive_ = curPlayerActive;
+        cursor_ = 0;
     }
 
     if (engine_.result() != Gen1BattleEngine::Result::ONGOING) {
-        // P1_WIN means side 0 won. If we're side 0, that's us.
-        bool iWin = (engine_.result() == Gen1BattleEngine::Result::P1_WIN && mySide_ == 0)
-                  || (engine_.result() == Gen1BattleEngine::Result::P2_WIN && mySide_ == 1);
-        bool iLose = (engine_.result() == Gen1BattleEngine::Result::P1_WIN && mySide_ == 1)
-                   || (engine_.result() == Gen1BattleEngine::Result::P2_WIN && mySide_ == 0);
-        if (iWin)       appendLog("You won!");
-        else if (iLose) appendLog("You blacked out...");
-        else            appendLog("It's a draw.");
+        switch (engine_.result()) {
+            case Gen1BattleEngine::Result::P1_WIN:
+                appendLog("You won!");
+                playerWon_ = true;
+                break;
+            case Gen1BattleEngine::Result::P2_WIN: appendLog("You blacked out…"); break;
+            case Gen1BattleEngine::Result::DRAW:   appendLog("It's a draw.");  break;
+            default: break;
+        }
+        // Server-auth: ship a final UPDATE carrying result so the client
+        // sees the end-of-battle state. Legacy path: nothing extra.
+        if (role_ == Role::SERVER) serverAuthSendUpdate();
         phase_ = Phase::FINISHED;
         return;
     }
     pendingRemoteAction_ = false;
-    if (mode_ == Mode::NETWORKED &&
-        engine_.turn() % TEXT_BATTLE_HASH_INTERVAL == 0) {
-        sendHash();
+    if (mode_ == Mode::NETWORKED) {
+        if (role_ == Role::SERVER) {
+            // Server-authoritative: ship UPDATE with the new board, no hash.
+            serverAuthSendUpdate();
+        } else if (engine_.turn() % TEXT_BATTLE_HASH_INTERVAL == 0) {
+            sendHash();
+        }
     }
     phase_ = Phase::WAIT_ACTION;
-    cursor_ = 0;
+    // Keep cursor_ on whatever move the user picked last turn — Gen 1 UX:
+    // tapping K/A repeatedly spams the same move.
+}
+
+void MonsterMeshTextBattle::inBattleLevelUp(uint8_t slot)
+{
+    auto &p  = engine_.party(0);
+    if (slot >= p.count || slot >= 6) return;
+    auto &m  = p.mons[slot];
+    uint8_t oldLvl = m.level;
+    if (oldLvl >= 100) return;
+    uint8_t newLvl = (uint8_t)(oldLvl + 1);
+
+    // Linear stat scale — not strictly Gen 1 accurate but avoids replumbing
+    // base stats + DVs through the engine. The proper recompute happens
+    // when the engine reloads from save next battle. Current hp rises by
+    // the same amount maxHp does so the user feels the level-up heal.
+    auto scale = [&](uint16_t v) -> uint16_t {
+        if (oldLvl == 0) return v;
+        uint32_t r = (uint32_t)v * newLvl / oldLvl;
+        return r > 0xFFFF ? 0xFFFF : (uint16_t)r;
+    };
+    uint16_t newMaxHp = scale(m.maxHp);
+    uint16_t deltaHp  = (newMaxHp > m.maxHp) ? (uint16_t)(newMaxHp - m.maxHp) : 0;
+    m.maxHp = newMaxHp;
+    if (m.hp + deltaHp > m.maxHp) m.hp = m.maxHp;
+    else                          m.hp = (uint16_t)(m.hp + deltaHp);
+    m.atk = scale(m.atk);
+    m.def = scale(m.def);
+    m.spd = scale(m.spd);
+    m.spc = scale(m.spc);
+    m.level = newLvl;
+
+    // Convert nickname from Gen 1 charset bytes to ASCII before display —
+    // m.nickname is the raw SAV-loaded byte sequence (PIKACHU = 0x8F88898081...).
+    // Without conversion, snprintf("%s") only renders the rare bytes that
+    // happen to be valid ASCII, which is why the message showed "P grew to
+    // L34" instead of "PIKACHU grew to L34".
+    char ascii[16];
+    gen1NameToAscii((const uint8_t *)m.nickname, sizeof(m.nickname),
+                    ascii, sizeof(ascii));
+    char line[40];
+    snprintf(line, sizeof(line), "%.10s grew to L%u!",
+             ascii[0] ? ascii : "?", (unsigned)newLvl);
+    appendLog(line);
 }
 
 void MonsterMeshTextBattle::handleFaints()
@@ -379,38 +986,57 @@ void MonsterMeshTextBattle::tick(uint32_t nowMs)
 {
     if (mode_ == Mode::OFF) return;
 
-    // Reveal queued log lines slowly so the player can read.
-    if (scrollPending_ && (nowMs - scrollMs_ >= SCROLL_INTERVAL_MS)) {
-        scrollMs_ = nowMs;
-        scrollPending_--;
-        dirty_ = true;
-    }
+    // (No periodic reveal: drawLog renders the whole log buffer at once,
+    // so a per-line scroll throttle here just caused steady-state repaints
+    // that read as screen flicker.)
 
     if (mode_ == Mode::NETWORKED) {
-        // Re-send party chunks during exchange.
-        if (phase_ == Phase::WAIT_PARTY &&
-            (nowMs - lastSendMs_ >= RESEND_INTERVAL_MS)) {
-            sendParty();
-            lastSendMs_ = nowMs;
-        }
-        // Re-broadcast our pending action periodically — LoRa is lossy.
-        if (phase_ == Phase::WAIT_REMOTE && lastSentAction_ != 0xFF &&
-            (nowMs - lastSendMs_ >= RESEND_INTERVAL_MS)) {
-            sendAction(lastSentAction_, lastSentIndex_);
-        }
-        // Timeout: opponent hasn't sent anything in a while.
-        if ((nowMs - lastRecvMs_) > REMOTE_TIMEOUT_MS &&
-            phase_ != Phase::FINISHED) {
-            appendLog("Opponent timed out.");
-            if (phase_ == Phase::WAIT_PARTY) {
-                // Engine not started yet, just abort.
-                phase_ = Phase::FINISHED;
-            } else {
-                engine_.forfeit(1 - mySide_, engineLogCb, this);
-                phase_ = Phase::FINISHED;
+        if (role_ == Role::SERVER) {
+            // Stamp when the server first reaches FINISHED (for pendingKeyExit_ timeout).
+            if (phase_ == Phase::FINISHED && finishedAtMs_ == 0) {
+                finishedAtMs_ = nowMs;
+            }
+            serverAuthRetransmit(nowMs);
+            // Release the key-exit hold once client acked or 45 s have elapsed.
+            if (pendingKeyExit_) {
+                if (!unackedUpdate_ || (finishedAtMs_ && (nowMs - finishedAtMs_) > 45000u)) {
+                    pendingKeyExit_ = false;
+                    exit();
+                    return;
+                }
+            }
+        } else if (role_ == Role::CLIENT) {
+            clientAuthRetransmit(nowMs);
+        } else {
+            // Re-broadcast our pending action periodically — LoRa is lossy.
+            if (phase_ == Phase::WAIT_REMOTE && lastSentAction_ != 0xFF &&
+                (nowMs - lastSendMs_ >= RESEND_INTERVAL_MS)) {
+                sendAction(lastSentAction_, lastSentIndex_);
             }
         }
-        // If both sides have submitted, resolve.
+        // Fallback: if WAIT_PEER_READY hasn't resolved in 10 s (peer is an
+        // older build without TEXT_BATTLE_READY), unblock and show the UI.
+        if (phase_ == Phase::WAIT_PEER_READY && nowMs >= peerReadyTimeoutMs_) {
+            phase_ = Phase::WAIT_ACTION;
+            appendLog("Peer ready (timeout)");
+            dirty_ = true;
+        }
+        // Timeout: opponent hasn't sent anything in a while. Server-auth
+        // uses the spec's 30 s window; legacy uses the legacy 60 s.
+        uint32_t timeout = (role_ != Role::LEGACY)
+                             ? TB_NO_TRAFFIC_TIMEOUT_MS
+                             : REMOTE_TIMEOUT_MS;
+        if ((nowMs - lastRecvMs_) > timeout &&
+            phase_ != Phase::FINISHED &&
+            phase_ != Phase::WAIT_PEER_READY && !awaitingAccept_) {
+            appendLog("Opponent timed out.");
+            if (engine_.result() == Gen1BattleEngine::Result::ONGOING) {
+                engine_.forfeit(1, engineLogCb, this);
+            }
+            phase_ = Phase::FINISHED;
+        }
+        // If both sides have submitted, resolve. Server-auth uses the same
+        // pendingRemoteAction_ flag (set in serverAuthOnActionV2Pkt).
         if (phase_ == Phase::WAIT_REMOTE && pendingRemoteAction_) {
             resolveTurn();
         }
@@ -433,45 +1059,160 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
     dirty_ = true;
 
     if (phase_ == Phase::FINISHED) {
-        // Any key dismisses the result screen.
+        // Server: if the final UPDATE hasn't been acked yet, hold the
+        // screen until the client confirms (or 45s fallback). This prevents
+        // exit() from clearing unackedUpdate_ and stopping the retransmit
+        // before the opponent receives the battle result.
+        if (role_ == Role::SERVER && unackedUpdate_ && !pendingKeyExit_) {
+            pendingKeyExit_ = true;
+            snprintf(endPromptOverride_, sizeof(endPromptOverride_),
+                     "Syncing to opponent...");
+            dirty_ = true;
+            return;
+        }
         exit();
         return;
     }
 
-    if (c == 'f' || c == 'F') {
-        if (mode_ == Mode::NETWORKED) {
-            sendForfeit(); engine_.forfeit(mySide_, engineLogCb, this); phase_ = Phase::FINISHED;
-        } else {
-            ++fleeAttempts_;
-            const auto &player = engine_.party(mySide_).mons[engine_.party(mySide_).active];
-            const auto &enemy  = engine_.party(1 - mySide_).mons[engine_.party(1 - mySide_).active];
-            uint32_t f = (uint32_t)player.spd * 32 / (enemy.spd + 1) + 30u * fleeAttempts_;
-            bool escaped = (f >= 255) || ((uint8_t)(mm_millis() & 0xFF) < (uint8_t)f);
-            if (escaped) { appendLog("Got away safely!"); phase_ = Phase::FINISHED; }
-            else { appendLog("Can't escape!"); engine_.submitAction(mySide_, 2 /*FLEE_FAIL*/, 0); phase_ = Phase::WAIT_REMOTE; }
+    // Server-auth client: CHALLENGE overlay. Y accepts, N declines.
+    // (K/L are reserved for the battle UI itself — K is the move-accept
+    // button and could be hit by accident while typing in the app.)
+    if (phase_ == Phase::WAIT_CHALLENGE_OVERLAY) {
+        if (c == 'y' || c == 'Y') {
+            clientAuthSendAccept(true);
+        } else if (c == 'n' || c == 'N' || c == 27 /*ESC*/) {
+            clientAuthSendAccept(false);
         }
+        // Any other key — ignore, leave the overlay up.
         return;
     }
+
+    // ESC = forfeit/exit (Nintendo Start menu quit).
     if (c == 27 /* ESC */) {
+        if (role_ == Role::CLIENT) {
+            // Client doesn't run an engine; just send a flee ACTION_V2 so
+            // the server forfeits us cleanly, then drop to FINISHED.
+            clientAuthSendActionV2(2 /*FLEE*/, 0);
+            phase_ = Phase::FINISHED;
+            return;
+        }
+        if (role_ == Role::SERVER) {
+            // Server-auth: ship a final UPDATE carrying the forfeit so the
+            // client transitions cleanly. Legacy FORFEIT packet isn't on
+            // the client's dispatch path here.
+            engine_.forfeit(0, engineLogCb, this);
+            serverAuthSendUpdate();
+            phase_ = Phase::FINISHED;
+            return;
+        }
         if (mode_ == Mode::NETWORKED) sendForfeit();
-        engine_.forfeit(mySide_, engineLogCb, this);
+        engine_.forfeit(0, engineLogCb, this);
         phase_ = Phase::FINISHED;
         return;
     }
 
+    // Block ALL non-ESC input while we're waiting for the opponent's
+    // action or rendering animations. Without this gate, repeated K
+    // presses after submitting a move re-call handleKey → keyAccept →
+    // engine_.submitAction(0,…) + sendAction(…) with the SAME turn,
+    // which overwrites our prevSent* history (every press demotes
+    // lastSent → prevSent, so after the second press both slots hold
+    // the same value and the peer-catch-up path can no longer help a
+    // peer stuck on the previous turn). It also floods the wire with
+    // duplicate ACTION packets out of band with the 4 s resend timer.
+    if (phase_ == Phase::WAIT_REMOTE || phase_ == Phase::ANIMATING ||
+        phase_ == Phase::WAIT_PEER_READY) {
+        return;
+    }
+
+    // Flee confirmation: K confirms (run the actual flee logic from below),
+    // anything else cancels back to the move menu. F was easy to hit by
+    // accident next to WASD, so a confirm gate keeps gauntlets recoverable.
+    if (phase_ == Phase::WAIT_FLEE) {
+        bool yes = (c == 'k' || c == 'K' || c == '\n' || c == '\r' || c == ' ');
+        if (!yes) {
+            phase_ = Phase::WAIT_ACTION;
+            return;
+        }
+        if (role_ == Role::CLIENT) {
+            clientAuthSendActionV2(2 /*FLEE*/, 0);
+            phase_ = Phase::FINISHED;
+            return;
+        }
+        if (mode_ == Mode::NETWORKED) {
+            sendForfeit(); engine_.forfeit(0, engineLogCb, this); phase_ = Phase::FINISHED;
+        } else if (role_ == Role::LEGACY) {
+            // Local CPU fight: flee always succeeds. No RNG formula needed.
+            appendLog("Got away safely!");
+            phase_ = Phase::FINISHED;
+        } else {
+            ++fleeAttempts_;
+            const auto &player = engine_.party(0).mons[engine_.party(0).active];
+            const auto &enemy  = engine_.party(1).mons[engine_.party(1).active];
+            uint32_t f = (uint32_t)player.spd * 32 / (enemy.spd + 1) + 30u * fleeAttempts_;
+            bool escaped = (f >= 255) || ((uint8_t)(mm_millis() & 0xFF) < (uint8_t)f);
+            if (escaped) { appendLog("Got away safely!"); phase_ = Phase::FINISHED; }
+            else { appendLog("Can't escape!"); engine_.submitAction(0, 2 /*FLEE_FAIL*/, 0); phase_ = Phase::WAIT_REMOTE; }
+        }
+        return;
+    }
+
+    if (c == 'f' || c == 'F') {
+        // F is right next to WASD, easy to hit by accident — bounce into a
+        // confirm phase instead of fleeing immediately. K confirms, L/F
+        // cancels back to the previous menu.
+        appendLog("Flee? K=yes  any=no");
+        phase_ = Phase::WAIT_FLEE;
+        dirty_ = true;
+        return;
+    }
+
+    // Catch attempt: C key during WAIT_ACTION in local (wild) battles.
+    // Sets the flag — the terminal's pumpBattle handles the actual catch
+    // logic (SRAM write). If catch succeeds, terminal calls exit().
+    // If it fails, battle continues (phase stays WAIT_ACTION).
+    if ((c == 'c' || c == 'C') && phase_ == Phase::WAIT_ACTION &&
+        mode_ == Mode::LOCAL_ROGUELIKE) {
+        catchAttempted_ = true;
+        dirty_ = true;
+        // Don't change phase — pumpBattle will handle success/failure
+        return;
+    }
+
+    // Nintendo-style mapping: K = A (accept) and L = B (back/cancel).
+    // Enter still works as an alternate accept; ESC falls through to forfeit.
+    bool keyAccept = (c == 'k' || c == 'K' || c == '\n' || c == '\r' || c == ' ');
+    bool keyBack   = (c == 'l' || c == 'L');
+
     if (phase_ == Phase::WAIT_SWITCH) {
-        const auto &p = engine_.party(mySide_);
+        const auto &p = engine_.party(0);
+        // 3×2 grid: W/S move between rows (±2 slots), A/D between columns.
+        // Arrow keys do the obvious thing: up/down by row, left/right by col.
+        auto wrap = [&](int v) {
+            int n = p.count;
+            return (uint8_t)((v % n + n) % n);
+        };
         if (c == 'w' || c == 'W' || c == 0xB5 /* up */)
-            switchCursor_ = (switchCursor_ + p.count - 1) % p.count;
+            switchCursor_ = wrap((int)switchCursor_ - 2);
         else if (c == 's' || c == 'S' || c == 0xB6 /* down */)
-            switchCursor_ = (switchCursor_ + 1) % p.count;
-        else if (c == '\n' || c == '\r' || c == ' ') {
+            switchCursor_ = wrap((int)switchCursor_ + 2);
+        else if (c == 'a' || c == 'A')
+            switchCursor_ = wrap((int)switchCursor_ - 1);
+        else if (c == 'd' || c == 'D')
+            switchCursor_ = wrap((int)switchCursor_ + 1);
+        else if (keyAccept) {
             if (p.mons[switchCursor_].hp > 0 && switchCursor_ != p.active) {
-                engine_.submitAction(mySide_, 1 /*SWITCH*/, switchCursor_);
-                if (mode_ == Mode::NETWORKED) sendAction(1, switchCursor_);
+                if (role_ == Role::CLIENT) {
+                    clientAuthSendActionV2(1 /*SWITCH*/, switchCursor_);
+                } else {
+                    engine_.submitAction(0, 1 /*SWITCH*/, switchCursor_);
+                    if (mode_ == Mode::NETWORKED && role_ == Role::LEGACY) {
+                        sendAction(1, switchCursor_);
+                    }
+                }
                 phase_ = Phase::WAIT_REMOTE;
             }
-        } else if (c == 27) {
+        } else if (keyBack || c == 27) {
             phase_ = Phase::WAIT_ACTION;
         }
         return;
@@ -479,16 +1220,1725 @@ void MonsterMeshTextBattle::handleKey(uint8_t c)
 
     if (phase_ != Phase::WAIT_ACTION) return;
 
+    // Move-pick navigation matches the switch menu's WASD pattern:
+    // 2×2 grid (slots 0/1 top, 2/3 bottom). W/S move between rows
+    // (±2 with wrap), A/D between columns (±1 with wrap). 1-4 still
+    // jump directly. The user accepts with K (Nintendo A).
+    auto wrap4 = [](int v) { return (uint8_t)((v % 4 + 4) % 4); };
+    int slot = -1;
     if (c >= '1' && c <= '4') {
-        uint8_t slot = c - '1';
-        const auto &mon = engine_.party(mySide_).mons[engine_.party(mySide_).active];
-        if (mon.moves[slot] == 0) { appendLog("No move there!");        return; }
-        if (mon.pp[slot] == 0)    { appendLog("Out of PP for that move!"); return; }
-        engine_.submitAction(mySide_, 0 /*USE_MOVE*/, slot);
-        if (mode_ == Mode::NETWORKED) sendAction(0, slot);
+        slot = c - '1';
+    } else if (c == 'w' || c == 'W' || c == 0xB5 /* up */) {
+        cursor_ = wrap4((int)cursor_ - 2);
+        dirty_ = true;
+        return;
+    } else if (c == 's' || c == 'S' || c == 0xB6 /* down */) {
+        cursor_ = wrap4((int)cursor_ + 2);
+        dirty_ = true;
+        return;
+    } else if (c == 'a' || c == 'A') {
+        cursor_ = wrap4((int)cursor_ - 1);
+        dirty_ = true;
+        return;
+    } else if (c == 'd' || c == 'D') {
+        cursor_ = wrap4((int)cursor_ + 1);
+        dirty_ = true;
+        return;
+    }
+
+    if (slot >= 0) {
+        cursor_ = (uint8_t)slot;
+        keyAccept = true;  // number key directly submits — no separate K press needed
+    }
+
+    if (keyAccept) {
+        // Networked initiator only: block move submission until the peer
+        // has proven their battle station is up by sending us anything in
+        // this session. Without this, an initiator who presses a move
+        // before the receiver's screen finished rendering produced a
+        // turn-0 ACTION the receiver missed → engines desynced from turn 0.
+        if (mode_ == Mode::NETWORKED && !peerReady_) {
+            appendLog("Waiting for opponent...");
+            dirty_ = true;
+            return;
+        }
+        const auto &mon = engine_.party(0).mons[engine_.party(0).active];
+        // Out of PP across the whole moveset → Gen 1 Struggle (id sentinel
+        // 0xFE on the wire). Without this, K-accept silently no-oped and the
+        // battle looked frozen after a long gauntlet drained every move.
+        bool anyPp = false;
+        for (uint8_t i = 0; i < 4; ++i) {
+            if (mon.moves[i] != 0 && mon.pp[i] > 0) { anyPp = true; break; }
+        }
+        if (!anyPp) {
+            // Client never runs the engine — just send ACTION_V2(Struggle).
+            if (role_ == Role::CLIENT) {
+                clientAuthSendActionV2(0 /*USE_MOVE*/, 0xFE /*STRUGGLE*/);
+            } else {
+                engine_.submitAction(0, 0 /*USE_MOVE*/, 0xFE /*STRUGGLE*/);
+                // Server-auth: client doesn't listen on the legacy ACTION
+                // wire; UPDATE conveys whatever happened post-resolve.
+                if (mode_ == Mode::NETWORKED && role_ == Role::LEGACY) {
+                    sendAction(0, 0xFE);
+                }
+            }
+            phase_ = Phase::WAIT_REMOTE;
+            return;
+        }
+        if (mon.moves[cursor_] == 0 || mon.pp[cursor_] == 0) {
+            ESP_LOGI(TAG, "[MMB] K-accept: REJECTED moves[%u]=%u pp[%u]=%u\n",
+                          (unsigned)cursor_, (unsigned)mon.moves[cursor_],
+                          (unsigned)cursor_, (unsigned)mon.pp[cursor_]);
+            return;
+        }
+        // Disabled move (Disable, mostly) — block selection so the user
+        // can't burn the K-accept on a move that won't fire. The greyed
+        // "DIS N" label in drawMoveMenu signals this visually.
+        if (mon.disabledSlot == cursor_ && mon.disabledTurns > 0) {
+            appendLog("That move is disabled.");
+            dirty_ = true;
+            return;
+        }
+        if (role_ == Role::CLIENT) {
+            clientAuthSendActionV2(0 /*USE_MOVE*/, cursor_);
+        } else {
+            engine_.submitAction(0, 0 /*USE_MOVE*/, cursor_);
+            if (mode_ == Mode::NETWORKED && role_ == Role::LEGACY) {
+                sendAction(0, cursor_);
+            }
+        }
         phase_ = Phase::WAIT_REMOTE;
-    } else if (c == 's' || c == 'S') {
-        switchCursor_ = engine_.party(mySide_).active;
+        return;
+    }
+
+    // P or L = open switch menu. L is the Gen-1 "B" button — natural pair
+    // with K=A for accept inside the switch menu (which also cancels).
+    // If the active mon is wrapped/bound (trapTurns > 0), block the
+    // switch — Gen 1's trapping moves prevent the target from switching
+    // out.
+    if (c == 'p' || c == 'P' || keyBack) {
+        const auto &activeMon = engine_.party(0).mons[engine_.party(0).active];
+        if (activeMon.trapTurns > 0) {
+            char buf[40];
+            snprintf(buf, sizeof(buf), "Can't switch — trapped for %u!",
+                     (unsigned)activeMon.trapTurns);
+            appendLog(buf);
+            dirty_ = true;
+            return;
+        }
+        switchCursor_ = engine_.party(0).active;
         phase_ = Phase::WAIT_SWITCH;
+        dirty_ = true;
+    }
+}
+
+// ── Render ──────────────────────────────────────────────────────────────────
+
+static void drawHpBar(pax_buf_t *fb, int x, int y, int w, int h,
+                       uint16_t hp, uint16_t maxHp)
+{
+    int filled = maxHp > 0 ? (w - 2) * hp / maxHp : 0;
+    gfx_drawRect(fb, x, y, w, h, FG);
+    gfx_fillRect(fb, x + 1, y + 1, w - 2, h - 2, DARK);
+    // HP bar fill: theme accent for healthy, theme light for mid, kept red
+    // for "danger" so the visual cue stands out regardless of palette.
+    uint16_t color = (hp * 4 > maxHp) ? ACC
+                   : (hp * 2 > maxHp) ? DIM
+                   : rgb565(0xC03020);  // crisis red — only off-palette spike
+    gfx_fillRect(fb, x + 1, y + 1, filled, h - 2, color);
+}
+
+void MonsterMeshTextBattle::drawHpPanel(pax_buf_t *fb, uint8_t side, int y)
+{
+    const auto &p = engine_.party(side);
+    const auto &m = p.mons[p.active];
+    // Count alive vs total — a "X/N" suffix shows how much of the team is
+    // still standing. Mostly useful for opponent gauntlets so the player
+    // can see whether they're on Brock's last mon.
+    uint8_t alive = 0;
+    for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+        if (p.mons[i].hp > 0) alive++;
+    }
+    char hdr[56];
+    snprintf(hdr, sizeof(hdr), "%s  L%u  %u/%u  [%u/%u]",
+             m.nickname[0] ? m.nickname : "?",
+             (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp,
+             (unsigned)alive, (unsigned)p.count);
+    gfx_setTextColor(FG, BG);
+    gfx_setCursor(8, y);
+    gfx_print(fb, hdr);
+    drawHpBar(fb, 8, y + 14, SCREEN_W - 16, 8, m.hp, m.maxHp);
+    // Substitute HP overlay: when sub is up, draw a second smaller bar in
+    // accent color just above the HP bar. Lets the player see the sub
+    // taking damage independently of HP.
+    if (m.substituteHp > 0) {
+        // Sub max in Gen 1 = maxHp / 4 (set on Substitute use).
+        uint16_t subMax = m.maxHp / 4;
+        if (subMax == 0) subMax = 1;
+        drawHpBar(fb, 8, y + 8, SCREEN_W - 16, 4, m.substituteHp, subMax);
+    }
+    // Status badge + sleep/confuse counter when applicable.
+    const char *st = nullptr;
+    if      (m.status & Gen1BattleEngine::ST_SLP) st = "SLP";
+    else if (m.status & Gen1BattleEngine::ST_PSN) st = "PSN";
+    else if (m.status & Gen1BattleEngine::ST_BRN) st = "BRN";
+    else if (m.status & Gen1BattleEngine::ST_PAR) st = "PAR";
+    else if (m.status & Gen1BattleEngine::ST_FRZ) st = "FRZ";
+    if (st) {
+        char badge[12];
+        if (m.status & Gen1BattleEngine::ST_SLP && m.sleepTurns)
+            snprintf(badge, sizeof(badge), "SLP%u", (unsigned)m.sleepTurns);
+        else
+            snprintf(badge, sizeof(badge), "%s", st);
+        gfx_setCursor(SCREEN_W - 50, y);
+        gfx_setTextColor(rgb565(0xC03020), BG);
+        gfx_print(fb, badge);
+    } else if (m.confuseTurns) {
+        char badge[12];
+        snprintf(badge, sizeof(badge), "CNF%u", (unsigned)m.confuseTurns);
+        gfx_setCursor(SCREEN_W - 50, y);
+        gfx_setTextColor(rgb565(0xC09020), BG);
+        gfx_print(fb, badge);
+    }
+
+    // Stat-boost mini-badges: print non-zero stages in a compact row right
+    // under the HP bar. Only show on side 0 (the player's own panel) to
+    // avoid revealing the opponent's stage tracking — Gen 1 messages tell
+    // the player about boosts as they happen but don't surface a board.
+    if (side == 0) {
+        char row[40] = {};
+        size_t rl = 0;
+        auto append = [&](const char *lbl, int8_t v) {
+            if (!v) return;
+            int n = snprintf(row + rl, sizeof(row) - rl,
+                             "%s%s%d ", lbl, v > 0 ? "+" : "", (int)v);
+            if (n > 0) rl += (size_t)n;
+        };
+        append("A", m.atkBoost);
+        append("D", m.defBoost);
+        append("S", m.spdBoost);
+        append("C", m.spcBoost);
+        if (rl > 0) {
+            gfx_setTextColor(ACC, BG);
+            gfx_setCursor(8, y + 24);
+            gfx_print(fb, row);
+        }
+        // Field effects on our side (active screens / mist / focused).
+        char fx[24] = {};
+        size_t fl = 0;
+        if (p.reflect)     fl += snprintf(fx+fl, sizeof(fx)-fl, "REF ");
+        if (p.lightScreen) fl += snprintf(fx+fl, sizeof(fx)-fl, "LSC ");
+        if (p.mist)        fl += snprintf(fx+fl, sizeof(fx)-fl, "MIST ");
+        if (p.focused)     fl += snprintf(fx+fl, sizeof(fx)-fl, "FOC ");
+        if (fl > 0) {
+            gfx_setTextColor(DIM, BG);
+            gfx_setCursor(SCREEN_W - 96, y + 24);
+            gfx_print(fb, fx);
+        }
+    } else {
+        // Opponent side: just show field effects (visible in Gen 1) but
+        // not stat boost stages.
+        char fx[24] = {};
+        size_t fl = 0;
+        if (p.reflect)     fl += snprintf(fx+fl, sizeof(fx)-fl, "REF ");
+        if (p.lightScreen) fl += snprintf(fx+fl, sizeof(fx)-fl, "LSC ");
+        if (p.mist)        fl += snprintf(fx+fl, sizeof(fx)-fl, "MIST ");
+        if (fl > 0) {
+            gfx_setTextColor(DIM, BG);
+            gfx_setCursor(SCREEN_W - 96, y);
+            gfx_print(fb, fx);
+        }
+    }
+}
+
+void MonsterMeshTextBattle::drawMoveMenu(pax_buf_t *fb)
+{
+    const auto &mon = engine_.party(0).mons[engine_.party(0).active];
+    int y = 296;   // inside the pokeball text box (starts at y=280)
+
+    static constexpr int colW = 360;
+    static constexpr int rowH = 24;
+    int colX[2] = { 50, 50 + colW };
+    int rowY[2] = { y + 0, y + rowH };
+
+    for (int i = 0; i < 4; ++i) {
+        const Gen1MoveData *mv = gen1Move(mon.moves[i]);
+        int cx = colX[i % 2];
+        int cy = rowY[i / 2];
+        bool selected = (i == cursor_);
+        bool disabled = (mon.disabledSlot == i && mon.disabledTurns > 0);
+        bool usable   = mon.pp[i] > 0 && !disabled;
+
+        // Highlight the selected slot with a DARK background bar.
+        if (selected) gfx_fillRect(fb, cx - 2, cy - 1, colW - 8, rowH, DARK);
+        uint16_t fg = !usable ? DIM : (selected ? FG : DIM);
+        uint16_t bg = selected ? DARK : BG;
+
+        // 2x2 grid layout: WASD steers the cursor, K accepts. The number
+        // labels remain as a quick-jump fallback.
+        static const char *kLabel[4] = { "1.", "2.", "3.", "4." };
+        gfx_setTextColor(fg, bg);
+        gfx_setCursor(cx, cy);
+        if (mv) {
+            if (disabled) {
+                gfx_printf(fb, "%s %-9.9s DIS%u",
+                          kLabel[i], mv->name, (unsigned)mon.disabledTurns);
+            } else {
+                gfx_printf(fb, "%s %-9.9s %u/%u",
+                          kLabel[i], mv->name, mon.pp[i], mv->pp);
+            }
+        } else {
+            gfx_printf(fb, "%s ---",  kLabel[i]);
+        }
+    }
+
+    // Footer: K=accept, S=switch, F=flee, L=cancel — all on one row.
+    // When every move is at 0 PP we fall back to Struggle on K, so swap the
+    // hint so the user isn't confused by an empty PP column.
+    bool anyPp = false;
+    for (uint8_t i = 0; i < 4; ++i) {
+        if (mon.moves[i] != 0 && mon.pp[i] > 0) { anyPp = true; break; }
+    }
+    gfx_setCursor(50, y + 2 * rowH + 8);
+    gfx_setTextColor(DIM, BG);
+    if (anyPp) gfx_print(fb, "WASD=move K=ok C=catch P=mons F=flee L=back");
+    else       gfx_print(fb, "Out of PP - K=Struggle P=mons F=flee L=back");
+}
+
+void MonsterMeshTextBattle::drawSwitchMenu(pax_buf_t *fb)
+{
+    const auto &p = engine_.party(0);
+    int yTop = 310;   // inside the pokeball text box
+    int colW = SCREEN_W / 2 - 30;
+    int rowH = 24;
+
+    gfx_setTextColor(FG, BG);
+    gfx_setCursor(50, 290); gfx_print(fb, "Pick a Pokemon:");
+
+    for (int i = 0; i < p.count && i < 6; ++i) {
+        int col = i % 2;
+        int row = i / 2;
+        int x = 4 + col * colW;
+        int y = yTop + row * rowH;
+        bool selected = (i == switchCursor_);
+        uint16_t bg = selected ? DARK : BG;
+        if (selected) gfx_fillRect(fb, x, y - 1, colW - 4, rowH, bg);
+        const auto &m = p.mons[i];
+        gfx_setTextColor(m.hp == 0 ? DIM : FG, bg);
+        gfx_setCursor(x + 4, y + 2);
+        gfx_printf(fb, "%c%-10.10s L%u %u/%u",
+                  i == p.active ? '*' : ' ',
+                  m.nickname[0] ? m.nickname : "?",
+                  (unsigned)m.level, (unsigned)m.hp, (unsigned)m.maxHp);
+    }
+}
+
+void MonsterMeshTextBattle::drawLog(pax_buf_t *fb)
+{
+    // Terminal-style log: oldest entry at the top of the band, newest at
+    // the bottom. When the band fills, the oldest scrolls off the top and
+    // every other line shifts up one row.
+    //
+    // We dropped the per-line scrollPending throttle that was previously
+    // here — it was revealing the newest line first at row 0 and back-
+    // filling older lines below it, which read backwards.
+    // Render log inside the pokeball text box, with generous padding
+    int yBase = 296;
+    int linePx = 22;
+    gfx_setTextColor(FG, BG);
+    uint8_t maxShow = 5;
+    uint8_t shown = logFill_ > maxShow ? maxShow : logFill_;
+    for (uint8_t i = 0; i < shown; ++i) {
+        int idx = (logHead_ + LOG_LINES - shown + i) % LOG_LINES;
+        char line[LOG_WIDTH + 4];
+        snprintf(line, sizeof(line), "> %s", log_[idx]);
+        gfx_setCursor(50, yBase + i * linePx);
+        gfx_print(fb, line);
+    }
+}
+
+void MonsterMeshTextBattle::drawHeader(pax_buf_t *fb)
+{
+    gfx_setTextColor(ACC, BG);
+    gfx_setCursor(8, 4);
+    if (headerOverride_[0]) {
+        gfx_print(fb, headerOverride_);
+    } else if (mode_ == Mode::NETWORKED) {
+        const char *tag = (role_ == Role::SERVER) ? "MMB-S"
+                        : (role_ == Role::CLIENT) ? "MMB-C"
+                                                  : "LoRa";
+        unsigned t = (role_ == Role::CLIENT) ? (unsigned)clientTurn_
+                                              : (unsigned)engine_.turn();
+        gfx_printf(fb, "%s vs %.6s  T%u", tag,
+                  peerTbName_[0] ? peerTbName_ : "?", t);
+    } else {
+        gfx_printf(fb, "Roguelike  T%u",  engine_.turn());
+    }
+}
+
+void MonsterMeshTextBattle::render(pax_buf_t *fb)
+{
+    if (!fb || mode_ == Mode::OFF) return;
+    gfx_fillScreen(fb, BG);
+    drawHeader(fb);
+
+    // CHALLENGE overlay: engine hasn't been initialized yet (start is
+    // deferred to ACCEPT), so the HP panels would render an empty
+    // "? L0 0/0" placeholder. Replace the whole battle UI with a
+    // centred challenge prompt instead.
+    if (phase_ == Phase::WAIT_CHALLENGE_OVERLAY) {
+        int by = SCREEN_H / 2 - 50;
+        int bh = 100;
+        gfx_fillRect(fb, 20, by, SCREEN_W - 40, bh, DARK);
+        gfx_drawRect(fb, 20, by, SCREEN_W - 40, bh, ACC);
+        gfx_setTextColor(FG, DARK);
+        gfx_setCursor(34, by + 14);
+        gfx_print(fb, "MonsterMesh Battle!");
+        gfx_setTextColor(ACC, DARK);
+        char who[40];
+        snprintf(who, sizeof(who), "%.12s wants to fight",
+                 peerTbName_[0] ? peerTbName_ : "Trainer");
+        gfx_setCursor(34, by + 36);
+        gfx_print(fb, who);
+        char party[40];
+        snprintf(party, sizeof(party), "Party: %u mon",
+                 (unsigned)pendingServerParty_.count);
+        gfx_setTextColor(DIM, DARK);
+        gfx_setCursor(34, by + 56);
+        gfx_print(fb, party);
+        gfx_setTextColor(FG, DARK);
+        gfx_setCursor(34, by + 76);
+        gfx_print(fb, "Y = ACCEPT    N = DECLINE");
+        dirty_ = false;
+        return;
+    }
+
+    // Initiator: hold full battle UI until receiver confirms readiness.
+    if (phase_ == Phase::WAIT_PEER_READY) {
+        gfx_setTextColor(FG, BG);
+        gfx_setCursor(8, SCREEN_H / 2 - 8);
+        gfx_print(fb, "Waiting for opponent…");
+        gfx_setTextColor(DIM, BG);
+        gfx_setCursor(8, SCREEN_H / 2 + 12);
+        gfx_print(fb, "Battle will start when they connect.");
+        dirty_ = false;
+        return;
+    }
+
+    // ── Gen 1 canonical staircase battle layout (800x480) ─────────────────
+    // Mirrors the original Pokemon Red/Blue screen:
+    //   Enemy info TOP-LEFT     |  Enemy front sprite TOP-RIGHT
+    //   Player back sprite MID-LEFT  |  Player info MID-RIGHT
+    //   ============ Pokeball text box / move menu BOTTOM ============
+    {
+        const auto &me  = engine_.party(0);
+        const auto &opp = engine_.party(1);
+        uint8_t foeSpecies = (opp.count > 0 && opp.active < opp.count)
+                                ? opp.mons[opp.active].species : 0;
+        uint8_t mySpecies  = (me.count > 0 && me.active < me.count)
+                                ? me.mons[me.active].species : 0;
+        uint16_t bgC = rgb565(0xFFFFFF);  // white bg for sprite transparency
+
+        // ── Foe front sprite: top-right, 88x88 @2x = 176x176 ──
+        renderSprite(fb, SCREEN_W - 176 - 30, 16, foeSpecies, false, bgC, 2);
+
+        // ── Player back sprite: mid-left, 80x80 @2x = 160x160 ──
+        renderSprite(fb, 30, 140, mySpecies, true, bgC, 2);
+
+        // ── Foe info panel: top-left ──
+        if (opp.count > 0 && opp.active < opp.count) {
+            const auto &m = opp.mons[opp.active];
+            char buf[48];
+            const char *name = m.nickname[0] ? m.nickname : "???";
+            snprintf(buf, sizeof(buf), "%s  L%u", name, (unsigned)m.level);
+            gfx_setTextColor(FG); gfx_setCursor(20, 24);
+            gfx_print(fb, buf);
+            // HP bar
+            drawHpBar(fb, 20, 42, 340, 12, m.hp, m.maxHp);
+            // Status tag
+            const char *stag = nullptr;
+            if (m.status & Gen1BattleEngine::ST_SLP) stag = "SLP";
+            else if (m.status & Gen1BattleEngine::ST_PAR) stag = "PAR";
+            else if (m.status & Gen1BattleEngine::ST_PSN) stag = "PSN";
+            else if (m.status & Gen1BattleEngine::ST_BRN) stag = "BRN";
+            else if (m.status & Gen1BattleEngine::ST_FRZ) stag = "FRZ";
+            if (stag) {
+                gfx_setTextColor(rgb565(0xC03020));
+                gfx_setCursor(370, 42);
+                gfx_print(fb, stag);
+            }
+        }
+
+        // ── Player info panel: mid-right ──
+        if (me.count > 0 && me.active < me.count) {
+            const auto &m = me.mons[me.active];
+            char buf[48];
+            const char *name = m.nickname[0] ? m.nickname : "???";
+            snprintf(buf, sizeof(buf), "%s  L%u", name, (unsigned)m.level);
+            gfx_setTextColor(FG); gfx_setCursor(420, 180);
+            gfx_print(fb, buf);
+            // HP bar
+            drawHpBar(fb, 420, 198, 340, 12, m.hp, m.maxHp);
+            // HP text
+            snprintf(buf, sizeof(buf), "HP %u/%u",
+                     (unsigned)m.hp, (unsigned)m.maxHp);
+            gfx_setTextColor(FG); gfx_setCursor(420, 216);
+            gfx_print(fb, buf);
+            // Status tag
+            const char *stag = nullptr;
+            if (m.status & Gen1BattleEngine::ST_SLP) stag = "SLP";
+            else if (m.status & Gen1BattleEngine::ST_PAR) stag = "PAR";
+            else if (m.status & Gen1BattleEngine::ST_PSN) stag = "PSN";
+            else if (m.status & Gen1BattleEngine::ST_BRN) stag = "BRN";
+            else if (m.status & Gen1BattleEngine::ST_FRZ) stag = "FRZ";
+            if (stag) {
+                gfx_setTextColor(rgb565(0xC03020));
+                gfx_setCursor(770, 198);
+                gfx_print(fb, stag);
+            }
+        }
+
+        // ── Pokeball-bordered text box (bottom area) ──
+        int boxY = 280, boxH = 185;
+        gfx_drawRect(fb, 10, boxY, SCREEN_W - 20, boxH, FG);
+        gfx_drawRect(fb, 14, boxY + 4, SCREEN_W - 28, boxH - 8, FG);
+        // Pokeball corner dots
+        gfx_fillRect(fb, 10, boxY, 6, 6, FG);
+        gfx_fillRect(fb, SCREEN_W - 16, boxY, 6, 6, FG);
+        gfx_fillRect(fb, 10, boxY + boxH - 6, 6, 6, FG);
+        gfx_fillRect(fb, SCREEN_W - 16, boxY + boxH - 6, 6, 6, FG);
+    }
+    // Like the real Pokemon games: text box shows EITHER the action log
+    // OR the move/switch menu, not both at the same time.
+    if (phase_ == Phase::WAIT_SWITCH)      drawSwitchMenu(fb);
+    else if (phase_ == Phase::WAIT_ACTION) drawMoveMenu(fb);
+    else if (phase_ == Phase::WAIT_FLEE) {
+        int by = 300;
+        int bh = 56;
+        gfx_fillRect(fb, 8, by, SCREEN_W - 16, bh, DARK);
+        gfx_drawRect(fb, 8, by, SCREEN_W - 16, bh, ACC);
+        gfx_setTextColor(FG, DARK);
+        gfx_setCursor(20, by + 8);
+        gfx_print(fb, "Flee?");
+        gfx_setTextColor(DIM, DARK);
+        gfx_setCursor(20, by + 28);
+        gfx_print(fb, "K=yes  L/F=no");
+    }
+    else {
+        // WAIT_REMOTE, ANIMATING, FINISHED — show the battle log
+        drawLog(fb);
+        if (phase_ == Phase::WAIT_REMOTE) {
+            gfx_setTextColor(DIM, BG);
+            gfx_setCursor(50, 440);
+            gfx_print(fb, mode_ == Mode::NETWORKED ? "Waiting for opponent..." : "...");
+        } else if (phase_ == Phase::FINISHED) {
+            gfx_setTextColor(FG, BG);
+            gfx_setCursor(50, 440);
+            gfx_print(fb, endPromptOverride_[0] ? endPromptOverride_ : "Press any key to exit.");
+        }
+    }
+    dirty_ = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-authoritative PvP — wire glue
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Local copies of packPartyMin / unpackPartyMin (mirror of the static
+// helpers in MonsterMeshModule.cpp; identical byte layout). Kept local so
+// the text-battle TU has no link-time dependency on the module's statics.
+namespace {
+void packPartyMinTb(const Gen1Party &src, uint8_t out[TB_PARTY_MIN_BYTES])
+{
+    out[0] = src.count;
+    for (uint8_t i = 0; i < 6; ++i) {
+        uint8_t *p = out + 1 + (size_t)i * 18;
+        const Gen1Pokemon &m = src.mons[i];
+        p[0] = m.species;
+        p[1] = m.level ? m.level : m.boxLevel;
+        p[2] = m.dvs[0];
+        p[3] = m.dvs[1];
+        memcpy(p +  4, m.hpExp,  2);
+        memcpy(p +  6, m.atkExp, 2);
+        memcpy(p +  8, m.defExp, 2);
+        memcpy(p + 10, m.spdExp, 2);
+        memcpy(p + 12, m.spcExp, 2);
+        memcpy(p + 14, m.moves,  4);
+    }
+}
+
+void unpackPartyMinTb(const uint8_t in[TB_PARTY_MIN_BYTES], Gen1Party &dst)
+{
+    memset(&dst, 0, sizeof(dst));
+    dst.count = in[0];
+    if (dst.count > 6) dst.count = 6;
+    for (uint8_t i = 0; i < 6; ++i) {
+        const uint8_t *p = in + 1 + (size_t)i * 18;
+        Gen1Pokemon &m = dst.mons[i];
+        m.species  = p[0];
+        m.level    = p[1];
+        m.boxLevel = p[1];
+        m.dvs[0]   = p[2];
+        m.dvs[1]   = p[3];
+        memcpy(m.hpExp,  p +  4, 2);
+        memcpy(m.atkExp, p +  6, 2);
+        memcpy(m.defExp, p +  8, 2);
+        memcpy(m.spdExp, p + 10, 2);
+        memcpy(m.spcExp, p + 12, 2);
+        memcpy(m.moves,  p + 14, 4);
+        for (uint8_t k = 0; k < 4; ++k) {
+            const Gen1MoveData *md = gen1Move(m.moves[k]);
+            m.pp[k] = md ? md->pp : 0;
+        }
+    }
+    for (uint8_t i = 0; i < 7; ++i) {
+        dst.species[i] = (i < dst.count) ? dst.mons[i].species : 0xFF;
+    }
+}
+} // namespace
+
+// Send the CHALLENGE packet. Layout:
+//   header (4B) | [0..3]=targetId (BE) [4]=gen [5]=nameLen [6..]=name | partyMin (109 B)
+void MonsterMeshTextBattle::serverAuthSendChallenge()
+{
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_CHALLENGE;
+    pkt->setSessionId(session_);
+    pkt->seq = 0;  // CHALLENGE doesn't participate in the UPDATE seq stream
+
+    // targetId (4B BE): receiving nodes drop the challenge if it's not for them.
+    pkt->payload[0] = (remoteId_ >> 24) & 0xFF;
+    pkt->payload[1] = (remoteId_ >> 16) & 0xFF;
+    pkt->payload[2] = (remoteId_ >>  8) & 0xFF;
+    pkt->payload[3] =  remoteId_        & 0xFF;
+
+    size_t nameLen = strlen(myTbName_);
+    if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
+    pkt->payload[4] = 1;                          // gen 1
+    pkt->payload[5] = (uint8_t)nameLen;
+    memcpy(pkt->payload + 6, myTbName_, nameLen);
+    packPartyMinTb(pendingMyParty_, pkt->payload + 6 + nameLen);
+
+    size_t payloadLen = 6 + nameLen + TB_PARTY_MIN_BYTES;
+    ESP_LOGI(TAG, "[MMB] serverAuthSendChallenge: sz=%u tries=%u session=0x%04X target=0x%08X\n",
+                  (unsigned)(BATTLELINK_HDR_SIZE + payloadLen),
+                  (unsigned)challengeTries_ + 1, (unsigned)session_, (unsigned)remoteId_);
+    radio_->sendPacket(remoteId_, MM_CHANNEL, buf, BATTLELINK_HDR_SIZE + payloadLen);
+    lastChallengeMs_ = mm_millis();
+    challengeTries_++;
+}
+
+// Build the canonical client-visible board buffer. Must be byte-identical
+// on server and client for the boardHash24 check to pass — i.e. wire side
+// 0 is "client's party" and wire side 1 is "server's party" on BOTH
+// sides. Each side initializes its local engine with itself as P0, so:
+//   on the SERVER (role=SERVER/LEGACY): wire 0 = engine P1, wire 1 = P0
+//   on the CLIENT  (role=CLIENT):       wire 0 = engine P0, wire 1 = P1
+// Similarly, the trailing "client's active mon PP" maps to engine P1 on
+// the server and engine P0 on the client. Both sides agree on which
+// 4-byte PP they're sampling.
+//
+// Same layout is the body of FULL_STATE.
+size_t MonsterMeshTextBattle::packClientStateFromEngine(uint8_t out[])
+{
+    bool roleClient = (role_ == Role::CLIENT);
+    // Client never calls engine_.executeTurn, so engine_.turn() stays at 0
+    // forever. Use the server-mirrored clientTurn_ instead — otherwise the
+    // hash mismatches every UPDATE after turn 0 and we fall into a
+    // STATE_REQUEST → FULL_STATE loop on every move.
+    uint16_t turn = roleClient ? (uint16_t)clientTurn_ : engine_.turn();
+    // Result is always ONGOING in the board hash. The client never calls
+    // executeTurn so engine_.result() is permanently ONGOING on that side,
+    // which caused the board hash to mismatch on every final UPDATE and
+    // forced a STATE_REQUEST → FULL_STATE cycle that never showed the result.
+    // The actual outcome is conveyed via the TB_UPD_RESULT flag in the UPDATE
+    // packet (serverAuthSendUpdate), not via the board hash.
+    uint8_t result = TB_RESULT_ONGOING;
+
+    size_t w = 0;
+    out[w++] = (turn >> 8) & 0xFF;
+    out[w++] =  turn       & 0xFF;
+    out[w++] = result;
+
+    // Role-dependent wire→engine mapping (see comment above).
+    static const uint8_t wireToEngineSrv[2] = { 1, 0 };
+    static const uint8_t wireToEngineCli[2] = { 0, 1 };
+    const uint8_t *map = roleClient ? wireToEngineCli : wireToEngineSrv;
+    for (uint8_t ws = 0; ws < 2; ++ws) {
+        const auto &party = engine_.party(map[ws]);
+        out[w++] = party.active;
+        out[w++] = party.count;
+        for (uint8_t i = 0; i < party.count && i < 6; ++i) {
+            const auto &m = party.mons[i];
+            out[w++] = (m.hp >> 8) & 0xFF;
+            out[w++] =  m.hp       & 0xFF;
+            out[w++] = m.status;
+        }
+    }
+
+    // "Client's active mon PP" — wire side 0 → engine P1 (server) or P0
+    // (client) depending on role.
+    uint8_t ppSide = roleClient ? 0 : 1;
+    const auto &cp = engine_.party(ppSide);
+    const auto &cm = cp.mons[cp.active];
+    for (uint8_t i = 0; i < 4; ++i) out[w++] = cm.pp[i];
+
+    return w;
+}
+
+// Build + send an UPDATE. For simplicity, every UPDATE carries every flag
+// section (HP/PP/switch/status) plus the inline boardHash24. Result + log
+// + needPlayerSwitch are conditional. This is bandwidth-wasteful vs a
+// true diff but keeps the implementation simple and the apply logic
+// trivially idempotent on the client side.
+void MonsterMeshTextBattle::serverAuthSendUpdate()
+{
+    uint8_t board[80];
+    size_t blen = packClientStateFromEngine(board);
+    uint32_t h24 = tbBoardHash24(board, blen);
+    // Heavy server-side buffer dump removed — was producing ~150 B of
+    // serial output PER UPDATE, which over 27+ turns saturated the
+    // USB-CDC and probably contributed to a watchdog reset. The client
+    // still dumps its own board on hash mismatch, which is rare enough
+    // to be diagnostic without being lethal.
+
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_UPDATE;
+    pkt->setSessionId(session_);
+    pkt->seq = ++updateSeq_;
+
+    uint16_t flags = TB_UPD_HP | TB_UPD_PP | TB_UPD_SWITCH | TB_UPD_STATUS |
+                     TB_UPD_BENCH | TB_UPD_FX;
+    bool finished = (engine_.result() != Gen1BattleEngine::Result::ONGOING);
+    if (finished) flags |= TB_UPD_RESULT;
+
+    // Drain the log buffer into the packet if there's room.
+    uint8_t numLogLines = 0;
+    if (unshippedLogLines_ > 0) {
+        numLogLines = unshippedLogLines_;
+        if (numLogLines > TB_UPDATE_MAX_LOG_LINES) {
+            numLogLines = TB_UPDATE_MAX_LOG_LINES;
+        }
+        flags |= TB_UPD_LOG;
+    }
+
+    // needPlayerSwitch on the CLIENT side (wire 0 = engine P1) when their
+    // active mon has fainted but the battle is still ongoing.
+    if (!finished) {
+        const auto &cp = engine_.party(1);
+        if (cp.mons[cp.active].hp == 0) flags |= TB_UPD_NEED_PLAYER_SWITCH;
+    }
+
+    size_t w = 0;
+    pkt->payload[w++] = (engine_.turn() & 0xFF);
+    pkt->payload[w++] = (flags >> 8) & 0xFF;
+    pkt->payload[w++] =  flags       & 0xFF;
+    pkt->payload[w++] = (h24 >> 16) & 0xFF;
+    pkt->payload[w++] = (h24 >>  8) & 0xFF;
+    pkt->payload[w++] =  h24        & 0xFF;
+
+    if (flags & TB_UPD_HP) {
+        const auto &c = engine_.party(1).mons[engine_.party(1).active];
+        const auto &s = engine_.party(0).mons[engine_.party(0).active];
+        pkt->payload[w++] = (c.hp >> 8) & 0xFF;
+        pkt->payload[w++] =  c.hp       & 0xFF;
+        pkt->payload[w++] = (s.hp >> 8) & 0xFF;
+        pkt->payload[w++] =  s.hp       & 0xFF;
+    }
+    if (flags & TB_UPD_PP) {
+        const auto &c = engine_.party(1).mons[engine_.party(1).active];
+        for (uint8_t i = 0; i < 4; ++i) pkt->payload[w++] = c.pp[i];
+    }
+    if (flags & TB_UPD_SWITCH) {
+        pkt->payload[w++] = engine_.party(1).active;
+        pkt->payload[w++] = engine_.party(0).active;
+    }
+    if (flags & TB_UPD_STATUS) {
+        pkt->payload[w++] = engine_.party(1).mons[engine_.party(1).active].status;
+        pkt->payload[w++] = engine_.party(0).mons[engine_.party(0).active].status;
+    }
+    if (flags & TB_UPD_RESULT) {
+        // Map engine result → client POV (engine P1 = client).
+        uint8_t r = TB_RESULT_ONGOING;
+        switch (engine_.result()) {
+            case Gen1BattleEngine::Result::P2_WIN: r = TB_RESULT_YOU_WIN;  break;
+            case Gen1BattleEngine::Result::P1_WIN: r = TB_RESULT_YOU_LOSE; break;
+            case Gen1BattleEngine::Result::DRAW:   r = TB_RESULT_DRAW;     break;
+            default: break;
+        }
+        pkt->payload[w++] = r;
+    }
+    if (flags & TB_UPD_LOG) {
+        // Reserve room for BENCH (≤49 B) + FX (≤19 B) that follow LOG —
+        // both write unconditionally without their own bounds checks, so
+        // if LOG fills close to the limit they'd scribble past
+        // pkt->payload[196] into adjacent stack memory and crash the
+        // deck. Reserve: BENCH(49) + EnemyBench(19) + FX(19) = 87 bytes.
+        const size_t kPostLogReserve = 95;
+        size_t logBudgetEnd = (BATTLELINK_MAX_PAYLOAD > kPostLogReserve)
+                                 ? (BATTLELINK_MAX_PAYLOAD - kPostLogReserve)
+                                 : 0;
+        // Patch numLogLines AFTER we know how many we actually fit, since
+        // the count drives the client-side parser. Without this patch the
+        // client would expect 6 lines but find 3, run off the buffer,
+        // and bail without applying BENCH/FX.
+        size_t countSlot = w;
+        pkt->payload[w++] = 0;
+        uint8_t shippedLines = 0;
+        // Walk back from the newest line by `numLogLines` so we ship
+        // exactly the lines that haven't been shipped yet, in oldest →
+        // newest order.
+        uint8_t startOffset = unshippedLogLines_;
+        if (startOffset > numLogLines) startOffset = numLogLines;
+        for (uint8_t i = 0; i < startOffset; ++i) {
+            uint8_t idx = (logHead_ + LOG_LINES - startOffset + i) % LOG_LINES;
+            size_t llen = strnlen(log_[idx], LOG_WIDTH);
+            if (w + 1 + llen > logBudgetEnd) break;
+            pkt->payload[w++] = (uint8_t)llen;
+            memcpy(pkt->payload + w, log_[idx], llen);
+            w += llen;
+            shippedLines++;
+        }
+        pkt->payload[countSlot] = shippedLines;
+        // Keep log_[] / logHead_ / logFill_ alive so the server's own
+        // drawLog() still has lines to render — without this the server
+        // screen went blank between turns. Just mark the lines as
+        // shipped so the next UPDATE doesn't re-ship them.
+        unshippedLogLines_ = 0;
+    }
+    if (flags & TB_UPD_BENCH) {
+        // CLIENT-side party state (wire 0 = engine P1). Keeps the client's
+        // switch menu accurate for HP, status, and per-slot PP that may
+        // have decremented while a mon was active. Also ships the active
+        // mon's stat-boost stages so the UI can show "+1 ATK" badges.
+        const auto &cp = engine_.party(1);
+        pkt->payload[w++] = cp.count;
+        for (uint8_t i = 0; i < cp.count && i < 6; ++i) {
+            const auto &m = cp.mons[i];
+            pkt->payload[w++] = (m.hp >> 8) & 0xFF;
+            pkt->payload[w++] =  m.hp       & 0xFF;
+            pkt->payload[w++] = m.status;
+            pkt->payload[w++] = m.pp[0];
+            pkt->payload[w++] = m.pp[1];
+            pkt->payload[w++] = m.pp[2];
+            pkt->payload[w++] = m.pp[3];
+        }
+        const auto &cmActive = cp.mons[cp.active];
+        pkt->payload[w++] = (uint8_t)cmActive.atkBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.defBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.spdBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.spcBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.accBoost;
+        pkt->payload[w++] = (uint8_t)cmActive.evaBoost;
+        // Server/enemy bench: HP + status for all of the server's mons
+        // (engine P0 on server = P1 from client's POV). Without this the
+        // client's engine retains stale HP for benched/fainted server mons
+        // and hashes differently after a server pokemon faints and switches.
+        const auto &sbp = engine_.party(0);
+        pkt->payload[w++] = sbp.count;
+        for (uint8_t i = 0; i < sbp.count && i < 6; ++i) {
+            pkt->payload[w++] = (sbp.mons[i].hp >> 8) & 0xFF;
+            pkt->payload[w++] =  sbp.mons[i].hp       & 0xFF;
+            pkt->payload[w++] = sbp.mons[i].status;
+        }
+    }
+    if (flags & TB_UPD_FX) {
+        // Per active mon + per side: visible Gen-1 FX state. Order:
+        //   wire 0 = client (engine P1), wire 1 = server (engine P0).
+        static const uint8_t wireToEng[2] = { 1, 0 };
+        for (uint8_t ws = 0; ws < 2; ++ws) {
+            const auto &party = engine_.party(wireToEng[ws]);
+            const auto &m     = party.mons[party.active];
+            pkt->payload[w++] = m.sleepTurns;
+            pkt->payload[w++] = m.confuseTurns;
+            pkt->payload[w++] = (m.substituteHp >> 8) & 0xFF;
+            pkt->payload[w++] =  m.substituteHp       & 0xFF;
+            uint8_t mf = 0;
+            if (m.mustRecharge)         mf |= 1u << 0;
+            if (m.flinched)             mf |= 1u << 1;
+            if (m.thrashing)            mf |= 1u << 2;
+            if (m.rageActive)           mf |= 1u << 3;
+            if (m.transformed)          mf |= 1u << 4;
+            if (m.chargingSlot != 0xFF) mf |= 1u << 5;
+            pkt->payload[w++] = mf;
+            uint8_t ff = 0;
+            if (party.reflect)     ff |= 1u << 0;
+            if (party.lightScreen) ff |= 1u << 1;
+            if (party.mist)        ff |= 1u << 2;
+            if (party.focused)     ff |= 1u << 3;
+            pkt->payload[w++] = ff;
+            pkt->payload[w++] = party.reflectTurns;
+            pkt->payload[w++] = party.lightScreenTurns;
+        }
+        // Client-side only: disabled move + trap counters (the opponent
+        // doesn't need to know exactly which slot is disabled — only the
+        // owner's UI uses these to grey out the disabled move and the
+        // switch option when wrapped).
+        const auto &cp2 = engine_.party(1);
+        const auto &cm2 = cp2.mons[cp2.active];
+        pkt->payload[w++] = cm2.disabledSlot;
+        pkt->payload[w++] = cm2.disabledTurns;
+        pkt->payload[w++] = cm2.trapTurns;
+    }
+
+    size_t pktLen = BATTLELINK_HDR_SIZE + w;
+    radio_->sendPacket(remoteId_, MM_CHANNEL, buf, pktLen);
+    memcpy(lastUpdateBuf_, buf, pktLen);
+    lastUpdateLen_     = pktLen;
+    unackedUpdate_     = true;
+    lastUpdateSendMs_  = mm_millis();
+    ESP_LOGI(TAG, "[MMB] server UPDATE tx seq=%u flags=0x%04X turn=%u "
+                  "logLines=%u pktLen=%u\n",
+                  (unsigned)updateSeq_, (unsigned)flags,
+                  (unsigned)engine_.turn(), (unsigned)numLogLines,
+                  (unsigned)pktLen);
+}
+
+void MonsterMeshTextBattle::serverAuthSendFullState()
+{
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_FULL_STATE;
+    pkt->setSessionId(session_);
+    pkt->seq = updateSeq_;
+    size_t blen = packClientStateFromEngine(pkt->payload);
+    radio_->sendPacket(remoteId_, MM_CHANNEL, buf, BATTLELINK_HDR_SIZE + blen);
+}
+
+// CLIENT → SERVER: an ACCEPT(1, party, name) lands. Unpack, init engine
+// with both parties, transition into RUN. ACCEPT(0) → "Declined" → exit.
+void MonsterMeshTextBattle::serverAuthOnAcceptPkt(uint32_t fromId,
+                                                  const uint8_t *buf, size_t len)
+{
+    if (!awaitingAccept_) {
+        ESP_LOGI(TAG, "[MMB] DROP ACCEPT from=0x%08X reason=not_awaiting\n",
+                      (unsigned)fromId);
+        return;
+    }
+    if (len < BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES) {
+        ESP_LOGI(TAG, "[MMB] DROP ACCEPT from=0x%08X reason=short_len=%u min=%u\n",
+                      (unsigned)fromId, (unsigned)len,
+                      (unsigned)(BATTLELINK_HDR_SIZE + 2 + TB_PARTY_MIN_BYTES));
+        return;
+    }
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) {
+        ESP_LOGI(TAG, "[MMB] DROP ACCEPT from=0x%08X reason=session pkt=0x%04X our=0x%04X\n",
+                      (unsigned)fromId, (unsigned)pkt->sessionId(),
+                      (unsigned)session_);
+        return;
+    }
+
+    uint8_t accepted = pkt->payload[0];
+    uint8_t nameLen  = pkt->payload[1];
+    if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 2 + nameLen + TB_PARTY_MIN_BYTES) {
+        ESP_LOGI(TAG, "[MMB] DROP ACCEPT from=0x%08X reason=short_after_name "
+                      "nameLen=%u len=%u\n",
+                      (unsigned)fromId, nameLen, (unsigned)len);
+        return;
+    }
+
+    if (!accepted) {
+        appendLog("Challenge declined.");
+        phase_ = Phase::FINISHED;
+        awaitingAccept_ = false;
+        dirty_ = true;
+        ESP_LOGI(TAG, "[MMB] server-auth ACCEPT(0) from=0x%08X\n",
+                      (unsigned)fromId);
+        return;
+    }
+
+    memset(peerTbName_, 0, sizeof(peerTbName_));
+    memcpy(peerTbName_, pkt->payload + 2, nameLen);
+    unpackPartyMinTb(pkt->payload + 2 + nameLen, pendingClientParty_);
+
+    // Init engine: P0 = us, P1 = client. Seed is private to server (client
+    // never runs the engine so doesn't need it).
+    uint32_t rngSeed = (uint32_t)(mm_millis() ^ esp_random() ^ fromId);
+    engine_.start(pendingMyParty_, pendingClientParty_, rngSeed);
+    // Heal both sides — same rationale as legacy networked path (PARTY_MIN
+    // strips HP/PP/status; everyone starts fully healed in mesh PvP).
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
+
+    awaitingAccept_ = false;
+    peerReady_      = true;
+    remoteId_       = fromId;
+    pendingRemoteAction_ = false;
+    phase_          = Phase::WAIT_ACTION;
+    // Refresh the no-traffic timer: until now we were awaitingAccept_ and
+    // the timeout was gated off, but lastRecvMs_ was stamped at CHALLENGE-
+    // send time. Without this refresh the 30 s clock could expire within
+    // a few seconds of the battle actually starting if the CHALLENGE +
+    // ACCEPT round-trip took most of the budget already.
+    lastRecvMs_     = mm_millis();
+    handleFaints();
+    appendLog("Battle begins!");
+    char wlog[40];
+    snprintf(wlog, sizeof(wlog), "Vs %.12s",
+             peerTbName_[0] ? peerTbName_ : "trainer");
+    appendLog(wlog);
+
+    // Drop any CHALLENGE retransmits still sitting in the TX queue —
+    // ACCEPT is in, the handshake is done, those would only delay the
+    // first UPDATE (LoRa drains at ~116 B/s, queue can have 2-3 stale
+    // 127-byte CHALLENGEs from before ACCEPT made it back).
+    /* no-op */;
+
+    // Ship a turn-0 UPDATE immediately so the client renders the initial
+    // board even before either side has acted.
+    serverAuthSendUpdate();
+
+    dirty_ = true;
+    ESP_LOGI(TAG, "[MMB] server-auth ACCEPT(1) from=0x%08X name=%s "
+                  "count=%u seed=0x%08X\n",
+                  (unsigned)fromId, peerTbName_,
+                  (unsigned)pendingClientParty_.count,
+                  (unsigned)rngSeed);
+}
+
+void MonsterMeshTextBattle::serverAuthOnActionV2Pkt(uint32_t fromId,
+                                                    const uint8_t *buf, size_t len)
+{
+    if (len < BATTLELINK_HDR_SIZE + TB_ACTION_BYTES) {
+        ESP_LOGI(TAG, "[MMB] DROP ACTION_V2 from=0x%08X reason=short_len=%u\n",
+                      (unsigned)fromId, (unsigned)len);
+        return;
+    }
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) {
+        ESP_LOGI(TAG, "[MMB] DROP ACTION_V2 from=0x%08X reason=session pkt=0x%04X our=0x%04X\n",
+                      (unsigned)fromId, (unsigned)pkt->sessionId(),
+                      (unsigned)session_);
+        return;
+    }
+    if (fromId != remoteId_) {
+        ESP_LOGI(TAG, "[MMB] DROP ACTION_V2 from=0x%08X reason=not_peer (peer=0x%08X)\n",
+                      (unsigned)fromId, (unsigned)remoteId_);
+        return;
+    }
+    ESP_LOGI(TAG, "[MMB] server ACTION_V2 rx from=0x%08X\n", (unsigned)fromId);
+
+    uint8_t turn, actionType, index, lastAckedSeq;
+    if (!tbUnpackAction(pkt->payload, len - BATTLELINK_HDR_SIZE,
+                        turn, actionType, index, lastAckedSeq)) return;
+
+    // ACK piggyback: clear unackedUpdate_ if the client confirmed our seq.
+    if (unackedUpdate_ && lastAckedSeq == updateSeq_) {
+        unackedUpdate_ = false;
+    }
+
+    // Ignore action for the wrong turn (idempotent: client retransmits).
+    if (turn != (uint8_t)(engine_.turn() & 0xFF)) {
+        ESP_LOGI(TAG, "[MMB] server-auth ACTION turn=%u (we're at %u) — "
+                      "dropping\n", turn, (unsigned)(engine_.turn() & 0xFF));
+        return;
+    }
+
+    if (actionType == 0xFE /* pure-ACK sentinel — client has no action yet */) {
+        lastRecvMs_ = mm_millis();
+        return;
+    }
+    if (actionType == 2 /* flee */) {
+        engine_.forfeit(1, engineLogCb, this);
+        appendLog("Opponent fled.");
+        phase_ = Phase::FINISHED;
+        serverAuthSendUpdate();
+        return;
+    }
+
+    engine_.submitAction(1, actionType, index);
+    pendingRemoteAction_ = true;
+    lastRecvMs_ = mm_millis();
+}
+
+void MonsterMeshTextBattle::serverAuthOnStateRequestPkt(uint32_t fromId,
+                                                        const uint8_t *buf, size_t len)
+{
+    if (len < BATTLELINK_HDR_SIZE + TB_STATE_REQUEST_BYTES) return;
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) return;
+    if (fromId != remoteId_) return;
+    uint8_t lastAppliedSeq = 0;
+    tbUnpackStateRequest(pkt->payload, len - BATTLELINK_HDR_SIZE, lastAppliedSeq);
+    ESP_LOGI(TAG, "[MMB] server-auth STATE_REQUEST from=0x%08X "
+                  "client_lastApplied=%u our_updateSeq=%u\n",
+                  (unsigned)fromId, lastAppliedSeq, (unsigned)updateSeq_);
+    serverAuthSendFullState();
+}
+
+void MonsterMeshTextBattle::serverAuthRetransmit(uint32_t nowMs)
+{
+    // CHALLENGE retransmit until ACCEPT arrives or tries exhausted.
+    if (awaitingAccept_) {
+        if (nowMs - lastChallengeMs_ >= TB_CHALLENGE_RESEND_MS) {
+            if (challengeTries_ >= TB_CHALLENGE_MAX_TRIES) {
+                appendLog("No response — cancelled.");
+                phase_ = Phase::FINISHED;
+                awaitingAccept_ = false;
+                dirty_ = true;
+                return;
+            }
+            serverAuthSendChallenge();
+        }
+        return;
+    }
+
+    // UPDATE retransmit until client acks via ACTION_V2.lastAckedSeq.
+    if (unackedUpdate_ && lastUpdateLen_ > 0 &&
+        (nowMs - lastUpdateSendMs_) >= TB_UPDATE_RESEND_MS) {
+        radio_->sendPacket(remoteId_, MM_CHANNEL, lastUpdateBuf_, lastUpdateLen_);
+        lastUpdateSendMs_ = nowMs;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENT — receive CHALLENGE → overlay → ACCEPT → drive battle from UPDATEs.
+//
+// The client uses engine_ as a static-data view: parties are loaded once
+// from CHALLENGE + ACCEPT (so maxHp / move tables / nicknames are populated
+// correctly for the existing renderer), but executeTurn / submitAction are
+// NEVER called. UPDATE packets mutate engine_.party() fields directly, so
+// every draw* helper renders authoritative server state with no changes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MonsterMeshTextBattle::clientAuthOnChallengePkt(uint32_t fromId,
+                                                     const uint8_t *buf, size_t len)
+{
+    if (len < BATTLELINK_HDR_SIZE + 6 + TB_PARTY_MIN_BYTES) {
+        ESP_LOGI(TAG, "[MMB] DROP CHALLENGE from=0x%08X reason=short_len=%u min=%u\n",
+                      (unsigned)fromId, (unsigned)len,
+                      (unsigned)(BATTLELINK_HDR_SIZE + 6 + TB_PARTY_MIN_BYTES));
+        return;
+    }
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+
+    // targetId: drop challenges not addressed to this node.
+    uint32_t targetId = ((uint32_t)pkt->payload[0] << 24) |
+                        ((uint32_t)pkt->payload[1] << 16) |
+                        ((uint32_t)pkt->payload[2] <<  8) |
+                                   pkt->payload[3];
+    if (targetId != 0 && myNodeNum_ != 0 && targetId != myNodeNum_) {
+        ESP_LOGI(TAG, "[MMB] DROP CHALLENGE from=0x%08X target=0x%08X (not us 0x%08X)\n",
+                      (unsigned)fromId, (unsigned)targetId, (unsigned)myNodeNum_);
+        return;
+    }
+
+    uint8_t gen     = pkt->payload[4];
+    uint8_t nameLen = pkt->payload[5];
+    if (gen != 1) {
+        ESP_LOGI(TAG, "[MMB] DROP CHALLENGE from=0x%08X reason=gen=%u (expected 1)\n",
+                      (unsigned)fromId, gen);
+        return;
+    }
+    if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
+    if (len < (size_t)BATTLELINK_HDR_SIZE + 6 + nameLen + TB_PARTY_MIN_BYTES) {
+        ESP_LOGI(TAG, "[MMB] DROP CHALLENGE from=0x%08X reason=short_after_name "
+                      "nameLen=%u len=%u\n",
+                      (unsigned)fromId, nameLen, (unsigned)len);
+        return;
+    }
+
+    // Duplicate CHALLENGE arriving after we've already ACCEPTed — server's
+    // CHALLENGE-retransmit ran longer than our ACCEPT made it back, or
+    // both arrived in the same cycle. Re-emit ACCEPT and don't reset
+    // state.
+    if (mode_ != Mode::OFF && role_ == Role::CLIENT &&
+        awaitingFirstUpdate_ && pkt->sessionId() == session_) {
+        ESP_LOGI(TAG, "[MMB] CHALLENGE re-rx for our active session "
+                      "(0x%04X) — re-emitting ACCEPT\n",
+                      (unsigned)session_);
+        clientAuthSendAccept(true);
+        return;
+    }
+
+    playerWon_ = false;
+    mode_     = Mode::NETWORKED;
+    role_     = Role::CLIENT;
+    phase_    = Phase::WAIT_CHALLENGE_OVERLAY;
+    remoteId_ = fromId;
+    session_  = pkt->sessionId();
+    cursor_   = 0; switchCursor_ = 0;
+    logFill_ = logHead_ = 0; scrollPending_ = 0;
+    peerReady_ = true;        // server already proved liveness by sending CHALLENGE
+    lastAppliedUpdateSeq_ = 0;
+    clientActionType_     = 0xFF;
+    clientNeedsFullState_ = false;
+    pendingRemoteAction_  = false;
+    preAcceptUpdateLen_   = 0;
+
+    memset(peerTbName_, 0, sizeof(peerTbName_));
+    memcpy(peerTbName_, pkt->payload + 6, nameLen);
+    unpackPartyMinTb(pkt->payload + 6 + nameLen, pendingServerParty_);
+
+    char line[40];
+    snprintf(line, sizeof(line), "%.12s wants to battle!",
+             peerTbName_[0] ? peerTbName_ : "Trainer");
+    appendLog(line);
+    appendLog("Y=accept  N=decline");
+    lastRecvMs_ = mm_millis();
+    dirty_ = true;
+    ESP_LOGI(TAG, "[MMB] server-auth CHALLENGE rx from=0x%08X session=0x%04X "
+                  "name=%s count=%u\n",
+                  (unsigned)fromId, (unsigned)session_,
+                  peerTbName_, (unsigned)pendingServerParty_.count);
+}
+
+void MonsterMeshTextBattle::clientAuthSendAccept(bool accepted)
+{
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACCEPT;
+    pkt->setSessionId(session_);
+    pkt->seq = 0;
+
+    size_t nameLen = strlen(myTbName_);
+    if (nameLen > TB_MAX_NAME_LEN) nameLen = TB_MAX_NAME_LEN;
+
+    pkt->payload[0] = accepted ? 1 : 0;
+    pkt->payload[1] = (uint8_t)nameLen;
+    memcpy(pkt->payload + 2, myTbName_, nameLen);
+    packPartyMinTb(pendingMyParty_, pkt->payload + 2 + nameLen);
+
+    size_t payloadLen = 2 + nameLen + TB_PARTY_MIN_BYTES;
+    bool qOk = radio_->sendPacket(remoteId_, MM_CHANNEL, buf, BATTLELINK_HDR_SIZE + payloadLen);
+    ESP_LOGI(TAG, "[MMB] clientAuthSendAccept: accepted=%u sz=%u session=0x%04X "
+                  "awaitingFirstUpdate=%u queueOk=%d\n",
+                  (unsigned)accepted,
+                  (unsigned)(BATTLELINK_HDR_SIZE + payloadLen),
+                  (unsigned)session_, (unsigned)awaitingFirstUpdate_,
+                  (int)qOk);
+    lastAcceptSendMs_ = mm_millis();
+
+    if (!accepted) {
+        appendLog("Declined.");
+        phase_ = Phase::FINISHED;
+        awaitingFirstUpdate_   = false;
+        awaitingUpdateSinceMs_ = 0;
+        return;
+    }
+
+    // Retransmit path: engine already started, just re-emit the wire
+    // packet so the server gets it if the first ACCEPT was lost.
+    if (awaitingFirstUpdate_) {
+        ESP_LOGI(TAG, "[MMB] server-auth ACCEPT(1) re-tx\n");
+        return;
+    }
+
+    // First-time path: init engine_ with both parties so the existing
+    // renderer has the static data it needs (maxHp, move tables, nicknames).
+    // We never call executeTurn — UPDATEs mutate engine_.party() fields.
+    engine_.start(pendingMyParty_, pendingServerParty_, /*rngSeed*/0);
+    for (uint8_t side = 0; side < 2; ++side) {
+        auto &p = engine_.party(side);
+        for (uint8_t i = 0; i < p.count && i < 6; ++i) {
+            auto &m = p.mons[i];
+            m.hp     = m.maxHp;
+            m.status = 0;
+            for (uint8_t s = 0; s < 4; ++s) {
+                const Gen1MoveData *mv = gen1Move(m.moves[s]);
+                m.pp[s] = mv ? mv->pp : 0;
+            }
+        }
+    }
+
+    phase_ = Phase::WAIT_REMOTE;   // await first UPDATE
+    awaitingFirstUpdate_   = true;
+    awaitingUpdateSinceMs_ = mm_millis();
+    appendLog("Battle begins!");
+    lastRecvMs_ = mm_millis();
+    dirty_ = true;
+    ESP_LOGI(TAG, "[MMB] server-auth ACCEPT(1) tx — awaiting first UPDATE\n");
+
+    // If the server sent TURN_UPDATE before we pressed Y, apply it now.
+    if (preAcceptUpdateLen_ > 0) {
+        size_t plen = preAcceptUpdateLen_;
+        preAcceptUpdateLen_ = 0;
+        ESP_LOGI(TAG, "[MMB] applying buffered pre-accept UPDATE len=%u\n", (unsigned)plen);
+        clientAuthOnUpdatePkt(preAcceptUpdateBuf_, plen);
+    }
+}
+
+// Apply an UPDATE delta to engine_ so the renderer shows authoritative
+// state. Wire side 0 = us (engine P0), wire side 1 = server (engine P1).
+void MonsterMeshTextBattle::clientAuthOnUpdatePkt(const uint8_t *buf, size_t len)
+{
+    if (len < BATTLELINK_HDR_SIZE + 6) {
+        ESP_LOGI(TAG, "[MMB] client UPDATE too short len=%u\n", (unsigned)len);
+        return;
+    }
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) {
+        ESP_LOGI(TAG, "[MMB] client UPDATE session mismatch pkt=0x%04X our=0x%04X\n",
+                      (unsigned)pkt->sessionId(), (unsigned)session_);
+        return;
+    }
+    // Engine not started yet — buffer this UPDATE for after Y is pressed.
+    if (phase_ == Phase::WAIT_CHALLENGE_OVERLAY) {
+        size_t copy = len < sizeof(preAcceptUpdateBuf_) ? len : sizeof(preAcceptUpdateBuf_);
+        memcpy(preAcceptUpdateBuf_, buf, copy);
+        preAcceptUpdateLen_ = copy;
+        ESP_LOGI(TAG, "[MMB] client UPDATE buffered (pre-accept) seq=%u\n",
+                      (unsigned)pkt->seq);
+        return;
+    }
+    ESP_LOGI(TAG, "[MMB] client UPDATE rx seq=%u len=%u flags=0x%04X\n",
+                  (unsigned)pkt->seq, (unsigned)len,
+                  (unsigned)(((uint16_t)pkt->payload[1] << 8) | pkt->payload[2]));
+    // First UPDATE proves the server got our ACCEPT — stop retransmitting it.
+    awaitingFirstUpdate_   = false;
+    awaitingUpdateSinceMs_ = 0;
+
+    // Snapshot server-side mons' HP BEFORE applying this UPDATE so we can
+    // detect any server mon that faints (= our kill) and credit XP / level
+    // up the corresponding active mon on our side. The server's
+    // resolveTurn only awards XP to side 0 (server's player); without
+    // this mirror on the client, the client never levels up from a
+    // PvP win.
+    uint16_t preEnemyHp[6] = {};
+    {
+        const auto &ep = engine_.party(1);
+        for (uint8_t i = 0; i < ep.count && i < 6; ++i) {
+            preEnemyHp[i] = ep.mons[i].hp;
+        }
+    }
+
+    // Idempotent dedupe: same seq already applied → ACK so server can
+    // clear unackedUpdate_, but don't reapply state. If the user hasn't
+    // picked an action yet (clientActionType_ == 0xFF), send a pure-ACK
+    // sentinel (0xFE) so the server doesn't treat our re-emit as a real
+    // engine submission. Without this gate, every server-side UPDATE
+    // retransmit advanced the server's turn counter with garbage on the
+    // client's side of the engine.
+    uint8_t seq = pkt->seq;
+    if (seq == lastAppliedUpdateSeq_ && lastAppliedUpdateSeq_ != 0) {
+        if (clientActionType_ != 0xFF) {
+            clientAuthSendActionV2(clientActionType_, clientActionIndex_);
+        } else {
+            clientAuthSendActionV2(0xFE /*pure-ACK*/, 0);
+        }
+        return;
+    }
+
+    size_t r = 0;
+    uint8_t  turn   = pkt->payload[r++];
+    clientTurn_ = turn;   // mirror so ACTION_V2 carries the right turn
+    uint16_t flags  = ((uint16_t)pkt->payload[r] << 8) | pkt->payload[r + 1];
+    r += 2;
+    uint8_t  h0 = pkt->payload[r++];
+    uint8_t  h1 = pkt->payload[r++];
+    uint8_t  h2 = pkt->payload[r++];
+    uint32_t serverHash = ((uint32_t)h0 << 16) |
+                          ((uint32_t)h1 <<  8) |
+                                     h2;
+
+    auto take = [&](size_t n) -> const uint8_t * {
+        if (r + n > len - BATTLELINK_HDR_SIZE) return nullptr;
+        const uint8_t *p = pkt->payload + r;
+        r += n;
+        return p;
+    };
+
+    // Sections in flag-order (TbUpdateFlag bit order).
+    if (flags & TB_UPD_HP) {
+        const uint8_t *p = take(4); if (!p) return;
+        uint16_t myHp     = ((uint16_t)p[0] << 8) | p[1];
+        uint16_t enemyHp  = ((uint16_t)p[2] << 8) | p[3];
+        auto &mp = engine_.party(0);
+        auto &ep = engine_.party(1);
+        if (mp.count) mp.mons[mp.active].hp = myHp;
+        if (ep.count) ep.mons[ep.active].hp = enemyHp;
+    }
+    if (flags & TB_UPD_PP) {
+        const uint8_t *p = take(4); if (!p) return;
+        auto &mp = engine_.party(0);
+        if (mp.count) for (uint8_t i = 0; i < 4; ++i) mp.mons[mp.active].pp[i] = p[i];
+    }
+    if (flags & TB_UPD_SWITCH) {
+        const uint8_t *p = take(2); if (!p) return;
+        if (p[0] < engine_.party(0).count) engine_.party(0).active = p[0];
+        if (p[1] < engine_.party(1).count) engine_.party(1).active = p[1];
+    }
+    if (flags & TB_UPD_STATUS) {
+        const uint8_t *p = take(2); if (!p) return;
+        auto &mp = engine_.party(0);
+        auto &ep = engine_.party(1);
+        if (mp.count) mp.mons[mp.active].status = p[0];
+        if (ep.count) ep.mons[ep.active].status = p[1];
+    }
+    bool finished = false;
+    if (flags & TB_UPD_RESULT) {
+        const uint8_t *p = take(1); if (!p) return;
+        uint8_t result = p[0];
+        if (result != TB_RESULT_ONGOING) {
+            finished = true;
+            switch (result) {
+                case TB_RESULT_YOU_WIN:
+                    appendLog("You won!");
+                    playerWon_ = true;
+                    break;
+                case TB_RESULT_YOU_LOSE: appendLog("You blacked out…"); break;
+                case TB_RESULT_DRAW:     appendLog("It's a draw."); break;
+                case TB_RESULT_FLED:     appendLog("Got away safely!"); break;
+                default: break;
+            }
+        }
+    }
+    if (flags & TB_UPD_LOG) {
+        const uint8_t *p = take(1); if (!p) return;
+        uint8_t numLines = *p;
+        for (uint8_t i = 0; i < numLines; ++i) {
+            const uint8_t *lp = take(1); if (!lp) break;
+            uint8_t llen = *lp;
+            const uint8_t *lb = take(llen); if (!lb) break;
+            char line[LOG_WIDTH + 1] = {};
+            uint8_t cp = llen < LOG_WIDTH ? llen : LOG_WIDTH;
+            memcpy(line, lb, cp);
+            line[cp] = '\0';
+            appendLog(line);
+        }
+    }
+    if (flags & TB_UPD_BENCH) {
+        const uint8_t *cp = take(1); if (!cp) return;
+        uint8_t count = *cp;
+        if (count > 6) count = 6;
+        auto &mp = engine_.party(0);
+        for (uint8_t i = 0; i < count; ++i) {
+            const uint8_t *p = take(7); if (!p) return;
+            if (i < mp.count) {
+                mp.mons[i].hp     = ((uint16_t)p[0] << 8) | p[1];
+                mp.mons[i].status = p[2];
+                mp.mons[i].pp[0]  = p[3];
+                mp.mons[i].pp[1]  = p[4];
+                mp.mons[i].pp[2]  = p[5];
+                mp.mons[i].pp[3]  = p[6];
+            }
+        }
+        const uint8_t *b = take(6); if (!b) return;
+        if (mp.count) {
+            auto &m = mp.mons[mp.active];
+            m.atkBoost = (int8_t)b[0];
+            m.defBoost = (int8_t)b[1];
+            m.spdBoost = (int8_t)b[2];
+            m.spcBoost = (int8_t)b[3];
+            m.accBoost = (int8_t)b[4];
+            m.evaBoost = (int8_t)b[5];
+        }
+        // Enemy bench: HP + status for all server mons (engine P1 from client).
+        // Keeps benched/fainted mons in sync so the hash matches after a switch.
+        const uint8_t *ecp = take(1); if (!ecp) return;
+        uint8_t ecount = *ecp; if (ecount > 6) ecount = 6;
+        auto &ep2 = engine_.party(1);
+        for (uint8_t i = 0; i < ecount; ++i) {
+            const uint8_t *p = take(3); if (!p) return;
+            if (i < ep2.count) {
+                ep2.mons[i].hp     = ((uint16_t)p[0] << 8) | p[1];
+                ep2.mons[i].status = p[2];
+            }
+        }
+    }
+    if (flags & TB_UPD_FX) {
+        // Wire 0 = us (engine P0); wire 1 = server (engine P1).
+        // 8 bytes per side: sleepTurns, confuseTurns, substituteHp(2 BE),
+        // monFlags, fieldFlags, reflectTurns, lightScreenTurns.
+        for (uint8_t ws = 0; ws < 2; ++ws) {
+            const uint8_t *p = take(8); if (!p) return;
+            auto &party = engine_.party(ws);
+            auto &m     = party.mons[party.active];
+            m.sleepTurns      = p[0];
+            m.confuseTurns    = p[1];
+            m.substituteHp    = ((uint16_t)p[2] << 8) | p[3];
+            uint8_t mf = p[4];
+            m.mustRecharge = (mf & (1u << 0)) != 0;
+            m.flinched     = (mf & (1u << 1)) != 0;
+            m.thrashing    = (mf & (1u << 2)) != 0;
+            m.rageActive   = (mf & (1u << 3)) != 0;
+            m.transformed  = (mf & (1u << 4)) != 0;
+            // Bit 5 (chargingSlot) is informational for the UI; engine
+            // tracks the actual slot index, so we don't restore that here.
+            uint8_t ff = p[5];
+            party.reflect     = (ff & (1u << 0)) != 0;
+            party.lightScreen = (ff & (1u << 1)) != 0;
+            party.mist        = (ff & (1u << 2)) != 0;
+            party.focused     = (ff & (1u << 3)) != 0;
+            party.reflectTurns     = p[6];
+            party.lightScreenTurns = p[7];
+        }
+        // Client-side disabled-move + trap counters.
+        const uint8_t *dis = take(3); if (!dis) return;
+        auto &mp2 = engine_.party(0);
+        if (mp2.count) {
+            auto &m = mp2.mons[mp2.active];
+            m.disabledSlot  = dis[0];
+            m.disabledTurns = dis[1];
+            m.trapTurns     = dis[2];
+        }
+    }
+    bool needSwitch = (flags & TB_UPD_NEED_PLAYER_SWITCH) != 0;
+
+    // ── Mirror the server's XP / in-battle level-up bookkeeping ─────────
+    // For every server-side mon that transitioned HP > 0 → 0 in this
+    // UPDATE, the corresponding kill belongs to one of OUR active mons.
+    // Apply the same Gen 1 formula the server uses in resolveTurn so
+    // the client's party levels up in sync with what we'd see on a
+    // local battle. Uses Gen1 base stats + level → baseYield, plus
+    // the legacy participantMask_ for share splitting.
+    {
+        const auto &ep = engine_.party(1);
+        for (uint8_t i = 0; i < ep.count && i < 6; ++i) {
+            if (preEnemyHp[i] == 0)            continue;  // already dead
+            if (ep.mons[i].hp != 0)            continue;  // still alive
+            // Just fainted — credit XP.
+            uint8_t pcount = (uint8_t)__builtin_popcount(participantMask_);
+            if (pcount == 0) pcount = 1;
+            uint32_t lvl = ep.mons[i].level ? ep.mons[i].level : 1;
+            uint8_t  dex = ep.mons[i].species;
+            const Gen1BaseStats &b =
+                GEN1_BASE_STATS[dex < 152 ? dex : 0];
+            uint32_t baseYield = (uint32_t)(b.hp + b.atk + b.def +
+                                            b.spd + b.spc) / 3;
+            if (baseYield < 20) baseYield = 20;
+            // PvP counts as a trainer battle (1.5× multiplier → ×3/×2
+            // to keep integer math).
+            uint32_t numerMult = 3u;
+            uint32_t xpThisFaint =
+                (baseYield * lvl * numerMult) /
+                (uint32_t)(14u * pcount);
+            if (xpThisFaint == 0) xpThisFaint = 1;
+            pendingXpDrops_++;
+            char line[40];
+            snprintf(line, sizeof(line), "Each earned %u XP!",
+                     (unsigned)xpThisFaint);
+            appendLog(line);
+            const auto &mp = engine_.party(0);
+            for (uint8_t s = 0; s < mp.count && s < 6; ++s) {
+                if (!(participantMask_ & (1u << s))) continue;
+                if (mp.mons[s].hp == 0) continue;
+                pendingXpPerSlot_[s] += xpThisFaint;
+                slotXpAccum_[s]      += xpThisFaint;
+                while (true) {
+                    uint8_t curLvl = engine_.party(0).mons[s].level;
+                    if (curLvl >= 100) break;
+                    uint32_t threshold =
+                        3u * (uint32_t)curLvl * curLvl +
+                        3u * (uint32_t)curLvl + 1u;
+                    if (slotXpAccum_[s] < threshold) break;
+                    slotXpAccum_[s] -= threshold;
+                    inBattleLevelUp(s);
+                }
+            }
+            // Reset participant mask to whoever's currently active — only
+            // mons present for the NEXT enemy share that one's XP.
+            participantMask_ = (uint8_t)(1u << engine_.party(0).active);
+        }
+    }
+    // Track new-active on our side too so participant mask grows when
+    // we switch in mid-battle.
+    {
+        uint8_t curActive = engine_.party(0).active;
+        if (curActive != lastPlayerActive_) {
+            participantMask_ |= (uint8_t)(1u << curActive);
+            lastPlayerActive_ = curActive;
+        }
+    }
+
+    // After applying, re-hash the canonical buffer and compare with the
+    // server's inline hash. Mismatch → STATE_REQUEST (P4). Match → ACK.
+    uint8_t board[80];
+    size_t blen = packClientStateFromEngine(board);
+    uint32_t myHash = tbBoardHash24(board, blen);
+    if (myHash != serverHash) {
+        clientNeedsFullState_ = true;
+        clientAuthSendStateRequest();
+        ESP_LOGI(TAG, "[MMB] client UPDATE hash mismatch turn=%u "
+                      "server=0x%06X mine=0x%06X blen=%u\n",
+                      turn, (unsigned)serverHash, (unsigned)myHash,
+                      (unsigned)blen);
+        // Dump the byte-by-byte canonical buffer so we can compare what
+        // the client computed against the server's payload (which we
+        // can reconstruct from the UPDATE wire). The hash inputs MUST
+        // match byte-for-byte; whatever differs points at the bug.
+        ESP_LOGI(TAG, "[MMB] client board: ");
+        for (size_t i = 0; i < blen; ++i) ESP_LOGI(TAG, "%02X ", board[i]);
+        ESP_LOGI(TAG, "\n");
+        // Don't advance lastAppliedUpdateSeq_ — wait for FULL_STATE.
+        lastRecvMs_ = mm_millis();
+        dirty_ = true;
+        return;
+    }
+
+    lastAppliedUpdateSeq_ = seq;
+    lastRecvMs_ = mm_millis();
+    dirty_ = true;
+
+    if (finished) {
+        phase_ = Phase::FINISHED;
+        // Still ACK so server clears unackedUpdate_ and stops retransmitting.
+        clientAuthSendActionV2(0xFE /*null action*/, 0);
+        return;
+    }
+    if (needSwitch) {
+        phase_ = Phase::WAIT_SWITCH;
+        switchCursor_ = engine_.party(0).active;
+        clientActionType_ = 0xFF;  // clear stale action so dedup can't replay it
+        ESP_LOGI(TAG, "[MMB] client UPDATE applied seq=%u → WAIT_SWITCH\n",
+                      (unsigned)seq);
+        return;
+    }
+    // Normal flow: server has resolved the turn and is now waiting for our
+    // next action.
+    phase_ = Phase::WAIT_ACTION;
+    clientActionType_ = 0xFF;  // clear stale action so dedup can't replay it
+    ESP_LOGI(TAG, "[MMB] client UPDATE applied seq=%u → WAIT_ACTION turn=%u\n",
+                  (unsigned)seq, (unsigned)clientTurn_);
+}
+
+void MonsterMeshTextBattle::clientAuthOnFullStatePkt(const uint8_t *buf, size_t len)
+{
+    if (len < BATTLELINK_HDR_SIZE + 5) return;
+    const BattlePacket *pkt = (const BattlePacket *)buf;
+    if (pkt->sessionId() != session_) return;
+    size_t r = 0;
+    uint16_t turn = ((uint16_t)pkt->payload[r] << 8) | pkt->payload[r + 1]; r += 2;
+    uint8_t  result = pkt->payload[r++];
+    (void)turn;
+
+    // Per-side decode: [active][count] then count×[hp:2][status]
+    for (uint8_t ws = 0; ws < 2; ++ws) {
+        if (r + 2 > len - BATTLELINK_HDR_SIZE) return;
+        uint8_t active = pkt->payload[r++];
+        uint8_t count  = pkt->payload[r++];
+        if (count > 6) count = 6;
+        // Wire side 0 = us (engine P0); side 1 = server (engine P1).
+        auto &party = engine_.party(ws);
+        if (active < count) party.active = active;
+        // Note: party.count is set when engine_.start() ran on ACCEPT; we
+        // don't change it here — counts must match. Just patch hp/status.
+        for (uint8_t i = 0; i < count; ++i) {
+            if (r + 3 > len - BATTLELINK_HDR_SIZE) return;
+            uint16_t hp = ((uint16_t)pkt->payload[r] << 8) | pkt->payload[r + 1];
+            uint8_t  st = pkt->payload[r + 2];
+            r += 3;
+            if (i < party.count) {
+                party.mons[i].hp     = hp;
+                party.mons[i].status = st;
+            }
+        }
+    }
+    // PP for our active mon.
+    if (r + 4 <= len - BATTLELINK_HDR_SIZE) {
+        auto &mp = engine_.party(0);
+        if (mp.count) for (uint8_t i = 0; i < 4; ++i) mp.mons[mp.active].pp[i] = pkt->payload[r + i];
+    }
+
+    clientNeedsFullState_  = false;
+    awaitingFirstUpdate_   = false;  // FULL_STATE is as good as the first UPDATE
+    awaitingUpdateSinceMs_ = 0;
+    lastAppliedUpdateSeq_ = pkt->seq;
+    lastRecvMs_ = mm_millis();
+    dirty_ = true;
+    // Discard any pending action from the diverged state so the retransmit
+    // timer doesn't replay it for the wrong turn after resync.
+    clientActionType_ = 0xFF;
+    appendLog("State reconverged.");
+
+    if (result == TB_RESULT_ONGOING) {
+        phase_ = Phase::WAIT_ACTION;
+    } else {
+        phase_ = Phase::FINISHED;
+    }
+    ESP_LOGI(TAG, "[MMB] client FULL_STATE applied seq=%u\n", (unsigned)pkt->seq);
+}
+
+void MonsterMeshTextBattle::clientAuthSendActionV2(uint8_t actionType, uint8_t index)
+{
+    uint8_t buf[BATTLELINK_MAX_PKT];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_ACTION_V2;
+    pkt->setSessionId(session_);
+    pkt->seq = 0;
+    // Use clientTurn_ (mirrored from each UPDATE) — engine_.turn() never
+    // advances on the client since we don't call executeTurn.
+    tbPackAction(pkt->payload, clientTurn_, actionType, index,
+                 lastAppliedUpdateSeq_);
+    radio_->sendPacket(remoteId_, MM_CHANNEL, buf, BATTLELINK_HDR_SIZE + TB_ACTION_BYTES);
+    if (actionType != 0xFE) {  // 0xFE = pure-ACK sentinel
+        clientActionType_       = actionType;
+        clientActionIndex_      = index;
+        clientActionTurn_       = clientTurn_;
+        lastClientActionSendMs_ = mm_millis();
+    }
+}
+
+void MonsterMeshTextBattle::clientAuthSendStateRequest()
+{
+    uint8_t buf[BATTLELINK_HDR_SIZE + TB_STATE_REQUEST_BYTES];
+    memset(buf, 0, sizeof(buf));
+    BattlePacket *pkt = (BattlePacket *)buf;
+    pkt->type = (uint8_t)PktType::TEXT_BATTLE_STATE_REQUEST;
+    pkt->setSessionId(session_);
+    pkt->seq = 0;
+    tbPackStateRequest(pkt->payload, lastAppliedUpdateSeq_);
+    radio_->sendPacket(remoteId_, MM_CHANNEL, buf, sizeof(buf));
+}
+
+void MonsterMeshTextBattle::clientAuthRetransmit(uint32_t nowMs)
+{
+    // P2.37: ACCEPT retransmit cadence is intentionally faster AND
+    // staggered relative to the server's CHALLENGE cadence. With both
+    // sides flood-broadcasting on 8 s intervals, the LoRa air would
+    // saturate and both radios "busyRx"-throttled each other's actual
+    // retransmits — neither side ever heard the other's packet.
+    // Client retries at ~5 s + jitter so the schedules don't lock.
+    //
+    // After 15 s the server has almost certainly received our ACCEPT
+    // (we'd have gotten a CHALLENGE re-tx otherwise). At that point
+    // the server is retransmitting the UPDATE every 15 s, but the
+    // re-transmitted ACCEPT is being dropped by the server (not_awaiting).
+    // Switch to STATE_REQUEST so the server sends a FULL_STATE, which
+    // the client can process to exit awaitingFirstUpdate_.
+    if (awaitingFirstUpdate_) {
+        uint32_t elapsedMs = nowMs - awaitingUpdateSinceMs_;
+        if (elapsedMs >= 15000u) {
+            // Server has our ACCEPT — pull state instead of re-sending ACCEPT.
+            if ((nowMs - lastAcceptSendMs_) >= 12000u) {
+                ESP_LOGI(TAG, "[MMB] awaitingFirstUpdate >15s — sending STATE_REQUEST\n");
+                clientAuthSendStateRequest();
+                lastAcceptSendMs_ = nowMs;
+            }
+        } else if ((nowMs - lastAcceptSendMs_) >= 5000u + (uint32_t)(esp_random() & 0x7FF)) {
+            clientAuthSendAccept(true);
+        }
+    }
+    // ACTION_V2 retransmit while waiting for next UPDATE.
+    // Blocked while clientNeedsFullState_ — retransmitting with an advanced
+    // clientTurn_ while the state is diverged causes the server to advance
+    // another turn from the wrong base, producing a cascade of mismatches.
+    // clientActionTurn_ guard: after each UPDATE clientTurn_ advances; only
+    // retransmit if the stored action was for THIS turn (not a stale action
+    // from the previous turn that would advance the server without the user
+    // picking a fresh move).
+    if (!clientNeedsFullState_ && clientActionType_ != 0xFF &&
+        clientActionTurn_ == clientTurn_ &&
+        (nowMs - lastClientActionSendMs_) >= TB_ACTION_RESEND_MS) {
+        clientAuthSendActionV2(clientActionType_, clientActionIndex_);
     }
 }

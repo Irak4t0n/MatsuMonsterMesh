@@ -9,17 +9,38 @@ GBC emulator for Tanmatsu/ESP32-P4, branched from GnuBoy. Sources: `main/main.c`
 
 ---
 
-## Session Jul 15 2026c — MQTT broker fix + hollaback command (Session 15)
+## Session Jul 15-16 2026 — Full battle station + PvP + catch (Session 15)
 
-1. **MQTT broker was defunct**: MonsterMesh channel TX (chat and beacons) was
-   silently dropped because the EMQX serverless broker
-   (`sf17b671.ala.us-east-1.emqxsl.com`) no longer exists. Upstream moved to
-   `mqtt.cableclub.net:8883` (TLS). Updated broker URI to match; MQTT now
-   connects successfully and MonsterMesh channel messages reach T-Deck peers.
-2. **`hb` (hollaback) command**: broadcasts a daycare beacon with
-   `requestResponse=1` (prompting peers to reply with their own beacon) and
-   immediately dumps the current neighbor list. Matches the upstream `hb`
-   command.
+Major session: MQTT fix, networked PvP, visual battle station, catch system.
+
+1. **MQTT broker fix**: updated to `mqtt.cableclub.net:8883` (TLS, matching
+   upstream Default.h). Old EMQX serverless instance was defunct.
+2. **`hb` (hollaback) command**: broadcast beacon + dump neighbor list.
+3. **`pvp <name>` command**: server-auth PvP protocol (0x66-0x6C) for T-Deck
+   interop. Initiator sends CHALLENGE (0x68), receiver sends ACCEPT (0x69),
+   server pushes UPDATE (0x66), client responds with ACTION_V2 (0x67).
+4. **Gen1BattleEngine synced**: upstream version with Gen 3 mechanics (split
+   SpA/SpD, modern crit rate, Dark/Steel types), full move effects
+   (Substitute, Bide, Mimic, Transform, flinch, charge moves, trapping),
+   matching hashState() for cross-device PvP.
+5. **Gen 3 sprite data**: Gen3Front565.h (88x88 front, DEFLATE-compressed
+   RGB565) and Gen3Back565.h (80x80 back). Decompressed via ESP-IDF's
+   tinfl_decompress_mem_to_mem and rendered pixel-by-pixel onto pax_buf_t.
+6. **Visual battle station**: full-screen Gen 1 staircase layout — foe sprite
+   top-right, foe info top-left, player back sprite mid-left, player info
+   mid-right, pokeball-bordered text box at bottom. 2x scaled sprites for
+   800x480 screen. White background, black text, colored HP bars.
+7. **Species normalization**: all Gen1Party readers (SRAM, Gen 1 WRAM, Gen 2
+   WRAM) now output dex numbers. Engine's initBattlePokeFromSave uses species
+   directly (no internalToDex). Nickname auto-detect: ASCII (0x20-0x7E) vs
+   Gen 1 charset (0x80+) to prevent double-decoding.
+8. **Catch system**: C key during wild battles. Gen 1 games write to SRAM
+   (party or PC box). Gen 2 games write directly to WRAM party via
+   addCaughtMonGen2(). Chance-based with HP/status modifiers.
+9. **BattlePacket.h synced**: upstream server-auth constants (TB_MAX_NAME_LEN,
+   TbUpdateFlag enum, TbClientResult enum, tbBoardHash24, pack/unpack helpers).
+10. **Input routing**: full-screen battle takes all keyboard input (WASD+K/L
+    navigation). Terminal's pumpBattle only tracks XP participation.
 
 ---
 

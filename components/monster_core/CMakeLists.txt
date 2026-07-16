@@ -25,8 +25,11 @@ idf_component_register(
     REQUIRES
         meshtastic_radio
         emulator_sram_iface
+        matsumonster_ui      # FastText rendering
         esp_timer
         esp_hw_support       # esp_random()
+        esp_rom              # miniz (tinfl_decompress)
+        robotman2412__pax-gfx
 )
 
 # The upstream MonsterMesh code uses `memset(&s, 0, sizeof(s))` on a few C++

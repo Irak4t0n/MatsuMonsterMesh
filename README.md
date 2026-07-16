@@ -109,6 +109,9 @@ in the badge-bsp managed component for the full pin map.
   (up to 200 chars), message history with word-wrap, side panel showing
   channel list / MQTT status / node count, and in-emulator notification
   overlay with unread message badge
+- **Visual battle station**: full-screen Gen 1 staircase layout with 2x-scaled
+  Gen 3 sprites (88x88 front, 80x80 back), HP bars, pokeball text box, catch
+  system (C key), WASD+K/L input. Server-auth PvP protocol for T-Deck interop.
 - **MQTT transport**: WiFi auto-connect, TLS to mqtt.cableclub.net,
   channel-based routing (MonsterMesh channel = MQTT, others = LoRa),
   ServiceEnvelope encoding matching official Meshtastic proto,

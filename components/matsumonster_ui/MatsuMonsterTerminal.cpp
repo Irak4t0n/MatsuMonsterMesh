@@ -165,7 +165,7 @@ static void build_wild_mon(Gen1Pokemon &p, uint8_t species, uint8_t level,
     memset(&p, 0, sizeof(p));
     Gen1BattleEngine::BattlePoke tmp;
     Gen1BattleEngine::initBattlePokeFromBase(tmp, species, level, moves);
-    p.species  = species;
+    p.species  = species;  // dex number (engine uses directly)
     p.boxLevel = level;
     p.level    = level;
     p.maxHp[0] = tmp.maxHp >> 8; p.maxHp[1] = tmp.maxHp & 0xFF;
@@ -193,23 +193,11 @@ MatsuMonsterTerminal::MatsuMonsterTerminal(PokemonDaycare        *daycare,
                                            IEmulatorSRAM         *sram)
   : daycare_(daycare), battle_(battle), radio_(radio), sram_(sram)
 {
-    // Subscribe to the battle's log stream so every turn line lands in our
-    // scrollback the instant it's generated. Without this we'd poll the
-    // engine's visible window and miss intermediate turn lines.
+    // Upstream API: pre-stage our party for incoming challenges.
+    // The battle object uses setMyTbParty() for auto-accept and
+    // getRecentLog() for the terminal to poll battle log lines.
     if (battle_) {
-        battle_->setExternalLogCallback(
-            [](const char *line, void *ctx) {
-                static_cast<MatsuMonsterTerminal *>(ctx)->println(line);
-            },
-            this);
-        battle_->setPartySupplier(
-            [](Gen1Party *out, void *ctx) -> bool {
-                auto *self = static_cast<MatsuMonsterTerminal *>(ctx);
-                if (!self->loadSavParty()) return false;
-                *out = self->sav_party_;
-                return true;
-            },
-            this);
+        battle_->setMyNodeNum(meshtastic_proto_node_id());
     }
 }
 
@@ -338,49 +326,102 @@ void MatsuMonsterTerminal::handleInput()
 void MatsuMonsterTerminal::pumpBattle()
 {
     if (!battle_) return;
-    // Drive the battle's per-frame state (CPU action submission in LOCAL
-    // mode, retry timers in NETWORKED mode, scroll throttle decrement).
-    // Log output now arrives via the ExternalLogCallback registered in the
-    // ctor - no polling needed here.
+
+    // Full-screen battle mode: tick() and dirty handling are done in
+    // render(), so we only track participation and XP payout here.
+    // Do NOT call tick() or clearDirty() — that would steal the dirty
+    // flag before render() sees it.
     if (battle_->isActive()) {
-        battle_->tick(now_ms());
-        if (battle_->dirty()) {
-            panel_dirty_ = true;  // HP/moves changed - redraw battle panel
-            battle_->clearDirty();
-        }
         // Track switches for XP participation
-        uint8_t cur = battle_->engine().party(battle_->mySide()).active;
+        uint8_t cur = battle_->engine().party(0).active;
         if (cur != battle_prev_active_) {
             battle_participated_ |= (1 << cur);
             battle_prev_active_ = cur;
         }
     }
 
-    // Auto-dismiss the result screen the moment the engine flips to FINISHED.
-    // Without this the user has to press a key to call exit(), which delays
-    // the XP-payout printout below (it's gated on the just_finished edge).
-    // appendLog has already forwarded "You won!" / "You blacked out..." into
-    // our scrollback synchronously, so there's nothing left for the user to
-    // read on the engine-owned screen.
-    if (battle_->isActive() &&
-        battle_->phase() == MonsterMeshTextBattle::Phase::FINISHED) {
-        battle_->exit();
-        dirty_ = true;
-        panel_dirty_ = true;   // switch from battle panel → idle panel
-        refreshPanelParty();
+    // Handle catch attempt DURING battle (C key sets catchAttempted flag).
+    if (battle_->isActive() && battle_->catchAttempted()) {
+        battle_->clearCatchAttempted();
+
+        // Detect Gen 2 — addCaughtMon only works with Gen 1 SRAM format
+        const char *romName = gnuboy_rom_name();
+        bool gen2 = romName && (strstr(romName, "CRYSTAL") ||
+                                strstr(romName, "GOLD") ||
+                                strstr(romName, "SILVER"));
+
+        if (!sram_ && !gen2) {
+            battle_->pushLog("No save data - can't catch!");
+        } else {
+            const auto &foe = battle_->engine().party(1).mons[
+                                  battle_->engine().party(1).active];
+            if (foe.species > 0 && foe.species <= 151 && foe.maxHp > 0) {
+                uint32_t hp_pct = (uint32_t)foe.hp * 100u / foe.maxHp;
+                int chance = 30 + (int)(100u - hp_pct);
+                if (foe.status != Gen1BattleEngine::ST_NONE) chance += 25;
+                if (chance > 95) chance = 95;
+                if (chance < 5)  chance = 5;
+                bool caught = ((int)(esp_random() % 100u)) < chance;
+                const char *foeName = foe.nickname[0] ? foe.nickname
+                                                       : speciesName(foe.species);
+                char msg[64];
+                snprintf(msg, sizeof(msg), "Threw a ball at %s!", foeName);
+                battle_->pushLog(msg);
+
+                if (caught) {
+                    DaycareSavPatcher::CaughtMon cm = {};
+                    cm.dexNum = foe.species;
+                    cm.level  = foe.level;
+                    cm.hp = foe.hp; cm.maxHp = foe.maxHp;
+                    cm.atk = foe.atk; cm.def = foe.def;
+                    cm.spd = foe.spd; cm.spc = foe.spc;
+                    cm.type1 = foe.type1; cm.type2 = foe.type2;
+                    memcpy(cm.moves, foe.moves, 4);
+                    memcpy(cm.pp, foe.pp, 4);
+                    cm.dvs[0] = 0x88; cm.dvs[1] = 0x88;
+                    snprintf(cm.nickname, sizeof(cm.nickname), "%s", foeName);
+
+                    int dest;
+                    if (gen2) {
+                        // Gen 2: write directly to WRAM party
+                        uint8_t *wram = gnuboy_wram_bank1();
+                        dest = wram ? DaycareSavPatcher::addCaughtMonGen2(wram, cm)
+                                    : -2;
+                    } else {
+                        // Gen 1: write to SRAM
+                        dest = DaycareSavPatcher::addCaughtMon(sram_, cm);
+                    }
+                    if (dest == 0) {
+                        snprintf(msg, sizeof(msg), "Gotcha! %s added to party!", foeName);
+                        battle_->pushLog(msg);
+                    } else if (dest >= 1) {
+                        snprintf(msg, sizeof(msg), "Gotcha! %s to PC Box %d!", foeName, dest);
+                        battle_->pushLog(msg);
+                    } else if (dest == -1) {
+                        battle_->pushLog("Party is full!");
+                    } else {
+                        battle_->pushLog("Can't catch - save error!");
+                    }
+                    battle_->exit();
+                    dirty_ = true;
+                    panel_dirty_ = true;
+                } else {
+                    snprintf(msg, sizeof(msg), "%s broke free!", foeName);
+                    battle_->pushLog(msg);
+                }
+            }
+        }
     }
 
-    // XP payout: when a battle that was ours-to-win just ended in P1_WIN,
-    // write the gained XP into the live SRAM (so it carries back into the
-    // emulator save) AND tell the daycare so its session counters
-    // (totalXpGained / totalLevelsGained) reflect battle wins too.
     bool just_finished = battle_was_active_ && !battle_->isActive();
+
+    // XP payout: when a battle that was ours-to-win just ended in P1_WIN,
     if (just_finished && xp_pending_) {
         xp_pending_ = false;
         bool won = battle_->engine().result() == Gen1BattleEngine::Result::P1_WIN;
         if (won && sram_) {
             const auto &eng = battle_->engine();
-            const auto &myParty = eng.party(battle_->mySide());
+            const auto &myParty = eng.party(0);
             uint32_t xp_total = (uint32_t)last_foe_level_ * 8u;
 
             // Detect Gen 2: patchPokemon uses Gen 1 SRAM offsets which
@@ -544,23 +585,13 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
     //   3. Otherwise (non-hotkey on empty buffer, OR any key with text
     //      already buffered) → fall through to the terminal input path,
     //      so the user can spell out `catch`+Enter.
+    // Full-screen battle: ALL keys go to the battle engine.
+    // The upstream battle UI uses WASD + K (accept) + L (back) + F (flee)
+    // + Y/N (challenge overlay) + ESC (forfeit). No terminal input during
+    // battle — exit() drops back to the terminal automatically.
     if (battle_ && battle_->isActive()) {
-        auto is_battle_hotkey = [](char c) -> bool {
-            return c == '1' || c == '2' || c == '3' || c == '4' ||
-                   c == 's' || c == 'S' || c == 'f' || c == 'F' ||
-                   c == 27 /* ESC */;
-        };
-        bool buffer_empty = (input_len_ == 0);
-        bool in_switch    = (battle_->phase() ==
-                             MonsterMeshTextBattle::Phase::WAIT_SWITCH);
-        if (in_switch ||
-            (buffer_empty && is_battle_hotkey(ascii))) {
-            battle_->handleKey((uint8_t)ascii);
-            dirty_ = true;
-            panel_dirty_ = true;  // battle panel HP/moves may have changed
-            return;
-        }
-        // Fall through: keystroke goes to the terminal input buffer.
+        battle_->handleKey((uint8_t)ascii);
+        return;
     }
 
     if (ascii == '\n' || ascii == '\r') { submitInput(); return; }
@@ -579,6 +610,15 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
 
 void MatsuMonsterTerminal::onNavigation(int key)
 {
+    // Route navigation keys to the battle engine when active.
+    if (battle_ && battle_->isActive()) {
+        if (key == BSP_INPUT_NAVIGATION_KEY_ESC)
+            battle_->handleKey(27);
+        else if (key == BSP_INPUT_NAVIGATION_KEY_RETURN)
+            battle_->handleKey('\r');
+        return;
+    }
+
     switch (key) {
         case BSP_INPUT_NAVIGATION_KEY_ESC:
             wants_exit_ = true;
@@ -675,6 +715,7 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     if      (starts_with(cmd, "party",  &args))  cmdParty();
     else if (starts_with(cmd, "status", &args) || starts_with(cmd, "st", &args))  cmdStatus();
     else if (starts_with(cmd, "fight",  &args) || starts_with(cmd, "f",  &args))  cmdFight(args);
+    else if (starts_with(cmd, "pvp",    &args))  cmdPvp(args);
     else if (starts_with(cmd, "run",    &args))  cmdRun();
     else if (starts_with(cmd, "catch",  &args))  cmdCatch();
     else if (starts_with(cmd, "gym",   &args))  cmdGym(args);
@@ -718,6 +759,7 @@ void MatsuMonsterTerminal::cmdHelp()
     println("  party       - list daycare party");
     println("  st          - daycare status + neighbors");
     println("  f <name>    - mirror match vs neighbor");
+    println("  pvp <name>  - networked PvP vs neighbor");
     println("  run         - wild encounter (badge route)");
     println("  catch       - catch current wild Pokemon");
     println("  gym [N]     - list/challenge gym N");
@@ -915,8 +957,69 @@ void MatsuMonsterTerminal::cmdFight(const char *args)
     xp_pending_          = true;
     battle_participated_ = (1 << 0);  // lead participates
     battle_prev_active_  = 0;
-    battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
+    battle_->startLocal(myParty, cpuParty);
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
+}
+
+void MatsuMonsterTerminal::cmdPvp(const char *args)
+{
+    if (!battle_ || !daycare_) {
+        println("(battle subsystem not wired)");
+        return;
+    }
+    if (battle_->isActive()) {
+        println("Already in a battle.");
+        return;
+    }
+    if (!*args) {
+        println("Usage: pvp <neighbor short name>");
+        return;
+    }
+
+    if (daycare_->getNeighborCount() == 0) {
+        println("No mesh neighbors yet - wait for beacons.");
+        return;
+    }
+
+    // Look the target up in the daycare's known-neighbours list.
+    const auto *nbrs = daycare_->getNeighbors();
+    uint8_t cnt = daycare_->getNeighborCount();
+    const auto *match = (decltype(nbrs))nullptr;
+    for (uint8_t i = 0; i < cnt; ++i) {
+        if (strncasecmp(nbrs[i].shortName, args, sizeof(nbrs[i].shortName)) == 0) {
+            match = &nbrs[i]; break;
+        }
+    }
+    if (!match) {
+        printf_line("No neighbour named '%s'.", args);
+        println("Try `st` to see who's nearby.");
+        return;
+    }
+
+    if (match->nodeId == 0) {
+        printf_line("%s has no node ID.", match->shortName);
+        return;
+    }
+
+    // Player party from the live save.
+    if (!loadSavParty()) {
+        println("(No live save - load a Pokemon ROM first.)");
+        return;
+    }
+
+    const char *trainerName = match->gameName[0] ? match->gameName : match->shortName;
+    printf_line("=== PvP Challenge vs %s ===", trainerName);
+    printf_line("Sending challenge to !%08lx...", (unsigned long)match->nodeId);
+
+    battle_type_         = BattleType::WILD;  // no LORD progression
+    last_battle_line_[0] = '\0';
+    xp_pending_          = false;  // no XP for PvP
+
+    battle_->setMyTbParty(sav_party_, daycare_->getGameName());
+    battle_->startServerAuthAsInitiator(match->nodeId, sav_party_,
+                                         daycare_->getGameName());
+    println("Challenge sent via mesh...");
+    println("1-4 = move, S = switch, F = forfeit, ESC = forfeit.");
 }
 
 // Re-read the live Gen1Party from the bound IEmulatorSRAM each call.
@@ -938,12 +1041,16 @@ bool MatsuMonsterTerminal::loadSavParty()
             ? DaycareSavPatcher::buildGen1PartyFromWRAM_Gen2(wram, &sav_party_)
             : DaycareSavPatcher::buildGen1PartyFromWRAM(wram, &sav_party_);
         sav_party_ready_ = (n > 0);
-        if (n > 0) return true;
+        if (n > 0) {
+            if (battle_) battle_->setMyTbParty(sav_party_, daycare_ ? daycare_->getGameName() : "");
+            return true;
+        }
     }
     // Fallback to SRAM if WRAM isn't available
     if (!sram_) return false;
     uint8_t n = DaycareSavPatcher::buildGen1Party(sram_, &sav_party_);
     sav_party_ready_ = (n > 0);
+    if (n > 0 && battle_) battle_->setMyTbParty(sav_party_, daycare_ ? daycare_->getGameName() : "");
     return n > 0;
 }
 
@@ -1082,7 +1189,7 @@ void MatsuMonsterTerminal::cmdCatch()
     // ball type, status, and a divisor that's brutal at full HP. Ours:
     //   base 30% + 1% per missing HP%, +25% if foe is statused, capped 95%.
     // Quick reference at L5 vs full-HP foe → 30%; at 1HP → 95%.
-    uint8_t foeSide = 1 - battle_->mySide();
+    uint8_t foeSide = 1 - 0;
     const auto &foe = battle_->engine().party(foeSide).mons[
                           battle_->engine().party(foeSide).active];
     if (foe.species == 0 || foe.maxHp == 0) {
@@ -1288,7 +1395,7 @@ void MatsuMonsterTerminal::cmdGym(const char *args)
     battle_participated_ = (1 << 0);
     battle_prev_active_  = 0;
     last_battle_line_[0] = '\0';
-    battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
+    battle_->startLocal(myParty, cpuParty);
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
 }
 
@@ -1342,7 +1449,7 @@ void MatsuMonsterTerminal::cmdE4()
     battle_participated_ = (1 << 0);
     battle_prev_active_  = 0;
     last_battle_line_[0] = '\0';
-    battle_->startLocal(myParty, cpuParty, "A trainer battle begins!");
+    battle_->startLocal(myParty, cpuParty);
     println("1-4 = move, S = switch, F = flee, ESC = forfeit.");
 }
 
@@ -1917,6 +2024,19 @@ void MatsuMonsterTerminal::cmdQuit()
 void MatsuMonsterTerminal::render()
 {
     if (!fb_ || canvas_w_ <= 0 || canvas_h_ <= 0) return;
+
+    // Full-screen battle rendering — takes over the entire display when
+    // the battle engine is active (PvP, fight, run, gym, e4, lord).
+    if (battle_ && battle_->isActive()) {
+        battle_->tick(now_ms());
+        if (battle_->dirty()) {
+            battle_->render(fb_);
+            battle_->clearDirty();
+            bsp_display_blit(0, 0, canvas_h_, canvas_w_, pax_buf_get_pixels(fb_));
+        }
+        return;
+    }
+
     if (!dirty_ && !panel_dirty_ && !input_only_dirty_) return;
 
     bool need_heavy = dirty_ || panel_dirty_;
@@ -2106,12 +2226,16 @@ void MatsuMonsterTerminal::drawBattlePanel(int x, int y, int right)
     fast_text_blit(fb_, x, y, "-- BATTLE --", COLOR_HEADER, right);
     y += LINE_PX + 2;
 
-    if (battle_->phase() == MonsterMeshTextBattle::Phase::WAIT_PARTY) {
-        fast_text_blit(fb_, x, y, "Exchanging parties...", COLOR_DIM, right);
+    if (battle_->phase() == MonsterMeshTextBattle::Phase::WAIT_PEER_READY) {
+        fast_text_blit(fb_, x, y, "Waiting for opponent...", COLOR_DIM, right);
+        return;
+    }
+    if (battle_->phase() == MonsterMeshTextBattle::Phase::WAIT_CHALLENGE_OVERLAY) {
+        fast_text_blit(fb_, x, y, "Incoming challenge!", COLOR_DIM, right);
         return;
     }
     const auto &eng = battle_->engine();
-    uint8_t side = battle_->mySide();
+    uint8_t side = 0;
     const auto &mp  = eng.party(side);
     const auto &fp  = eng.party(1 - side);
     if (mp.count == 0 || fp.count == 0) return;

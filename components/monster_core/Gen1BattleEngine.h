@@ -14,8 +14,8 @@
 
 #pragma once
 
-#include <stdint.h>
-#include <stddef.h>
+#include <cstdint>
+#include <cstring>
 #include "PokemonData.h"
 #include "showdown_gen1_moves.h"
 #include "showdown_gen1_typechart.h"
@@ -42,6 +42,9 @@ public:
         uint8_t  type1     = 0, type2 = 0;
         uint16_t hp        = 0, maxHp = 0;
         uint16_t atk = 0, def = 0, spd = 0, spc = 0;
+        // Gen-3 mode only: Special split into Sp.Atk / Sp.Def. Unused (0)
+        // in Gen-1 mode, which keeps using spc for both. See setGen().
+        uint16_t spaG3 = 0, spdG3 = 0;
         uint8_t  moves[4]  = {};
         uint8_t  pp[4]     = {};
         // Live state (cleared on switch-out except status)
@@ -54,9 +57,32 @@ public:
         bool     mustRecharge  = false;
         bool     thrashing     = false;
         uint8_t  thrashTurns   = 0;
-        uint8_t  lastMoveIdx   = 0xFF;     // for Counter (Gen 2-aware stub)
+        uint8_t  lastMoveIdx   = 0xFF;     // last move slot used (Counter / Mimic)
         uint8_t  disabledSlot  = 0xFF;
         uint8_t  disabledTurns = 0;
+        bool     flinched      = false;    // skip next move if hit by EFF_FLINCH
+        uint8_t  chargingSlot  = 0xFF;     // EFF_CHARGE_TURN: slot being charged
+        uint8_t  trapTurns     = 0;        // EFF_TRAPPING: target turns left
+        uint8_t  thrashSlot    = 0xFF;     // EFF_THRASH: locked-in move slot
+        uint16_t bideTurns     = 0;        // EFF_BIDE turn counter (0 = inactive)
+        uint16_t bideDamage    = 0;        // accumulated damage to release
+        bool     rageActive    = false;    // EFF_RAGE
+        uint16_t substituteHp  = 0;        // EFF_SUBSTITUTE: 0 = no sub
+        uint16_t lastDamageTaken = 0;      // physical-only, for Counter
+        // EFF_MIMIC: a single slot temporarily holds a copied move; the
+        // original is restored on switch-out.
+        uint8_t  mimicSlot     = 0xFF;
+        uint8_t  mimicOrigMove = 0;
+        uint8_t  mimicOrigPp   = 0;
+        // EFF_TRANSFORM: full backup of the fields Transform overwrites,
+        // restored on switch-out.
+        bool     transformed   = false;
+        uint8_t  origSpecies   = 0;
+        uint8_t  origType1     = 0, origType2 = 0;
+        uint16_t origAtk = 0, origDef = 0, origSpd = 0, origSpc = 0;
+        uint16_t origSpaG3 = 0, origSpdG3 = 0;
+        uint8_t  origMoves[4]  = {};
+        uint8_t  origPp[4]     = {};
     };
 
     struct BattleParty {
@@ -74,7 +100,18 @@ public:
     // Initialise from two Gen1Party save records. Both sides MUST pass the
     // same `rngSeed` for deterministic execution.
     void start(const Gen1Party &p1, const Gen1Party &p2,
-               uint32_t rngSeed, uint8_t gen = 1);
+               uint32_t rngSeed, uint8_t gen = 3);
+
+    // Battle-mechanics generation: 1 = classic Gen-1, 3 = Gen 2/3-style
+    // (Special split, staged 1/16 crits, Dark/Steel + modern chart). Must
+    // match the opponent's for deterministic cross-play.
+    void    setGen(uint8_t g) { gen_ = g; }
+    uint8_t gen() const { return gen_; }
+
+    // Gym gauntlet: swap in a fresh opponent without resetting our side.
+    // Player keeps their current HP, PP, status, boosts. Opponent is
+    // re-initialized from `p` and result_ goes back to ONGOING.
+    void replaceOpponent(const Gen1Party &p);
 
     // Single-side submission. `side` is 0 (us) or 1 (opponent).
     // Returns true once both sides have submitted and the turn can be executed.
@@ -90,6 +127,7 @@ public:
 
     Result   result()  const { return result_; }
     uint16_t turn()    const { return turn_; }
+    uint8_t  pendAction(uint8_t side) const { return pendAction_[side & 1]; }
 
     const BattleParty &party(uint8_t side) const { return p_[side & 1]; }
     BattleParty       &party(uint8_t side)       { return p_[side & 1]; }
@@ -109,16 +147,16 @@ public:
     // build wild encounters from base stats without going through Gen1Party.
     static void initBattlePokeFromSave(BattlePoke &dst,
                                        const Gen1Pokemon &src,
-                                       const uint8_t nick[11]);
+                                       const uint8_t nick[11], uint8_t gen = 1);
     static void initBattlePokeFromBase(BattlePoke &dst,
                                        uint8_t species, uint8_t level,
-                                       const uint8_t moves[4]);
+                                       const uint8_t moves[4], uint8_t gen = 1);
 
 private:
     BattleParty p_[2];
     uint32_t    rng_     = 0;
     uint16_t    turn_    = 0;
-    uint8_t     gen_     = 1;
+    uint8_t     gen_     = 3;   // Gen 2/3 mechanics by default (no toggle)
     Result      result_  = Result::ONGOING;
 
     // Pending submitted actions for next turn.
@@ -132,6 +170,10 @@ private:
     bool     percent(uint8_t p); // true with probability p%
 
     // Battle math.
+    bool     isGen3() const { return gen_ >= 3; }
+    // Move data for the active mechanics generation (gen3 re-types the
+    // same 165 ids; effects+PP identical, so safe everywhere).
+    const Gen1MoveData *mdata(uint8_t id) const;
     uint16_t calcDamage(uint8_t side, uint8_t targetSide,
                         const Gen1MoveData &mv, bool &outCrit);
     uint8_t  effectiveness(uint8_t atkType, uint8_t defType) const;

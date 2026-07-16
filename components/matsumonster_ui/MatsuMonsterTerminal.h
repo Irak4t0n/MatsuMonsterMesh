@@ -105,6 +105,7 @@ private:
     void cmdParty();
     void cmdStatus();
     void cmdFight(const char *args);
+    void cmdPvp(const char *args);
     void cmdRun();
     void cmdCatch();
     void cmdGym(const char *args);

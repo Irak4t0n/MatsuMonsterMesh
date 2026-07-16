@@ -19,11 +19,11 @@ namespace Gen1Text {
     static constexpr const char *FAINT = "[POKEMON] fainted!";
     static constexpr const char *FOE_SEND = "Foe sent out [POKEMON]!";
     static constexpr const char *FORFEIT = "[POKEMON] forfeited the match.";
-    static constexpr const char *IMMUNE = "It doesn't affect [POKEMON]…";
+    static constexpr const char *IMMUNE = "It doesn't affect [POKEMON]...";
     static constexpr const char *MISS = "[POKEMON]'s attack missed!";
     static constexpr const char *OHKO = "It's a one-hit KO!";
     static constexpr const char *RECOIL = "[POKEMON] is hit with recoil!";
-    static constexpr const char *RESIST = "It's not very effective…";
+    static constexpr const char *RESIST = "It's not very effective...";
     static constexpr const char *STATUS_BRN = "[POKEMON] was burned!";
     static constexpr const char *STATUS_CONFUSE = "[POKEMON] became confused!";
     static constexpr const char *STATUS_FRZ = "[POKEMON] was frozen solid!";

@@ -1026,6 +1026,11 @@ public:
         out->count = count;
         memcpy(out->species, &sram[SAV_SPECIES_LIST], 7);
         memcpy(out->mons,    &sram[SAV_POKEMON_DATA], count * sizeof(Gen1Pokemon));
+        // Convert Gen 1 internal codes → dex numbers (engine uses dex directly)
+        for (uint8_t i = 0; i < count; ++i) {
+            out->species[i]      = internalToDex[out->species[i]];
+            out->mons[i].species = internalToDex[out->mons[i].species];
+        }
         for (uint8_t i = 0; i < count; ++i) {
             const uint8_t *nickRaw = &sram[SAV_NICKNAMES + i * SAV_NAME_SIZE];
             for (int j = 0; j < 10; ++j) {
@@ -1069,8 +1074,7 @@ public:
         if (count > 6) count = 6;
         out->count = count;
 
-        // Species list — store dex numbers directly (battle engine indexes
-        // GEN1_BASE_STATS by dex number, not Gen 1 internal index)
+        // Species list — dex numbers directly (Gen 2 format)
         for (uint8_t i = 0; i < count; ++i)
             out->species[i] = wram_bank1[G2_WRAM_SPECIES_LIST + i];
         out->species[count] = 0xFF;
@@ -1166,6 +1170,67 @@ public:
         return newLevel;
     }
 
+    // ── Add caught Pokemon to Gen 2 WRAM party ────────────────────────
+    // Writes directly to live WRAM (party only, no PC support).
+    // Returns 0 on success (added to party), -1 if party full.
+    static int addCaughtMonGen2(uint8_t *wram_bank1, const CaughtMon &mon) {
+        if (!wram_bank1 || mon.dexNum == 0) return -2;
+        uint8_t count = wram_bank1[G2_WRAM_PARTY_COUNT];
+        if (count >= 6) return -1;  // party full
+
+        uint8_t i = count;
+        wram_bank1[G2_WRAM_PARTY_COUNT] = count + 1;
+
+        // Species list (dex numbers directly for Gen 2)
+        wram_bank1[G2_WRAM_SPECIES_LIST + i] = mon.dexNum;
+        wram_bank1[G2_WRAM_SPECIES_LIST + i + 1] = 0xFF; // terminator
+
+        // 48-byte Gen 2 Pokemon struct
+        uint8_t *g2 = &wram_bank1[G2_WRAM_POKEMON_DATA + i * G2_POKEMON_SIZE];
+        memset(g2, 0, G2_POKEMON_SIZE);
+        g2[0x00] = mon.dexNum;       // species (dex number)
+        g2[0x01] = 0;                // held item
+        memcpy(&g2[0x02], mon.moves, 4);  // moves
+        g2[0x06] = 0x00; g2[0x07] = 0x01; // OT ID placeholder
+        // EXP (3 bytes BE) — calculate from level
+        uint32_t exp = (mon.dexNum <= 251) ? expForLevel(mon.dexNum, mon.level) : 0;
+        g2[0x08] = (uint8_t)(exp >> 16);
+        g2[0x09] = (uint8_t)(exp >> 8);
+        g2[0x0A] = (uint8_t)(exp);
+        // Stat EXP (all zero for wild catch)
+        // DVs
+        g2[0x15] = mon.dvs[0];
+        g2[0x16] = mon.dvs[1];
+        // PP
+        memcpy(&g2[0x17], mon.pp, 4);
+        // Level
+        g2[0x1F] = mon.level;
+        // Status = 0
+        // Current HP
+        g2[0x22] = (uint8_t)(mon.maxHp >> 8);
+        g2[0x23] = (uint8_t)(mon.maxHp);
+        // Calculated stats (pre-calculated from battle engine)
+        g2[0x24] = (uint8_t)(mon.maxHp >> 8); g2[0x25] = (uint8_t)(mon.maxHp);
+        g2[0x26] = (uint8_t)(mon.atk >> 8);   g2[0x27] = (uint8_t)(mon.atk);
+        g2[0x28] = (uint8_t)(mon.def >> 8);   g2[0x29] = (uint8_t)(mon.def);
+        g2[0x2A] = (uint8_t)(mon.spd >> 8);   g2[0x2B] = (uint8_t)(mon.spd);
+        g2[0x2C] = (uint8_t)(mon.spc >> 8);   g2[0x2D] = (uint8_t)(mon.spc);
+        g2[0x2E] = (uint8_t)(mon.spc >> 8);   g2[0x2F] = (uint8_t)(mon.spc); // SpDef = Spc
+
+        // Nickname (Gen 1 charset, 11 bytes with 0x50 terminator)
+        uint8_t *nick = &wram_bank1[G2_WRAM_NICKNAMES + i * SAV_NAME_SIZE];
+        memset(nick, SAV_STRING_TERMINATOR, SAV_NAME_SIZE);
+        for (int j = 0; j < 10 && mon.nickname[j]; ++j)
+            nick[j] = asciiToGen1Char(mon.nickname[j]);
+
+        // OT name (use "MESH" as placeholder)
+        uint8_t *ot = &wram_bank1[G2_WRAM_OT_NAMES + i * SAV_NAME_SIZE];
+        memset(ot, SAV_STRING_TERMINATOR, SAV_NAME_SIZE);
+        ot[0] = 0x8C; ot[1] = 0x84; ot[2] = 0x92; ot[3] = 0x87; // MESH
+
+        return 0;
+    }
+
     // ── Build a Gen1Party from WRAM (live emulator state) ─────────────
     static uint8_t buildGen1PartyFromWRAM(const uint8_t *wram_bank1,
                                           Gen1Party *out) {
@@ -1177,6 +1242,11 @@ public:
         memcpy(out->species, &wram_bank1[WRAM_SPECIES_LIST], 7);
         memcpy(out->mons, &wram_bank1[WRAM_POKEMON_DATA],
                count * sizeof(Gen1Pokemon));
+        // Convert Gen 1 internal codes → dex numbers (engine uses dex directly)
+        for (uint8_t i = 0; i < count; ++i) {
+            out->species[i]      = internalToDex[out->species[i]];
+            out->mons[i].species = internalToDex[out->mons[i].species];
+        }
         for (uint8_t i = 0; i < count; ++i) {
             const uint8_t *nickRaw = &wram_bank1[WRAM_NICKNAMES + i * SAV_NAME_SIZE];
             for (int j = 0; j < 10; ++j) {

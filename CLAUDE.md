@@ -8,15 +8,19 @@ Players use LoRa radio to exchange daycare beacons and battle over the mesh — 
 
 ## Current State (Session 15)
 
-Session 15 (Jul 15 2026) — MQTT broker fix + hollaback command:
-- MQTT broker updated: `mqtts://sf17b671...emqxsl.com:8883` changed to
-  `mqtts://mqtt.cableclub.net:8883` matching upstream Default.h; old EMQX
-  serverless instance was defunct, preventing all MonsterMesh channel TX
-- `hb` (hollaback) terminal command: broadcasts beacon with requestResponse=1
-  then dumps current neighbor list; matches upstream `hb` command
-- Known upstream gaps (documented, not ported): networked PvP initiation
-  (0x66-0x6C server-auth protocol), Gauntlet/mmg (0x70-0x76), Dungeon
-  (0x80-0x86), upstream engine gen=3 default
+Session 15 (Jul 15-16 2026) — MQTT fix, PvP, visual battle station:
+- MQTT broker updated to `mqtts://mqtt.cableclub.net:8883` (upstream Default.h)
+- `hb` (hollaback) terminal command added
+- `pvp <name>` command: server-auth PvP protocol (0x66-0x6C) for T-Deck interop
+- Gen1BattleEngine synced with upstream (Gen 3 mechanics, full move effects,
+  Substitute/Bide/Mimic/Transform, matching hashState for PvP)
+- Gen 3 data files: showdown_gen3_basestats/moves/typechart.h
+- Gen 3 sprite data: Gen3Front565.h (88x88), Gen3Back565.h (80x80)
+- **Visual battle station**: full-screen Gen 1 staircase layout with 2x scaled
+  sprites, white background, HP bars, pokeball-bordered text box, WASD+K/L input
+- Species handling: all readers normalize to dex numbers, engine skips internalToDex
+- Catch system: C key during wild battles, Gen 1 SRAM + Gen 2 WRAM support
+- Known upstream gaps: Gauntlet/mmg (0x70-0x76), Dungeon (0x80-0x86)
 
 ## Previous State (Session 14b)
 
