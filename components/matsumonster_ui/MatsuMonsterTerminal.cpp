@@ -355,7 +355,7 @@ void MatsuMonsterTerminal::pumpBattle()
         } else {
             const auto &foe = battle_->engine().party(1).mons[
                                   battle_->engine().party(1).active];
-            if (foe.species > 0 && foe.species <= 151 && foe.maxHp > 0) {
+            if (foe.species > 0 && foe.species <= 251 && foe.maxHp > 0) {
                 uint32_t hp_pct = (uint32_t)foe.hp * 100u / foe.maxHp;
                 int chance = 30 + (int)(100u - hp_pct);
                 if (foe.status != Gen1BattleEngine::ST_NONE) chance += 25;
@@ -383,24 +383,32 @@ void MatsuMonsterTerminal::pumpBattle()
 
                     int dest;
                     if (gen2) {
-                        // Gen 2: write directly to WRAM party
+                        // Gen 2: try WRAM party first, then SRAM PC box
                         uint8_t *wram = gnuboy_wram_bank1();
                         dest = wram ? DaycareSavPatcher::addCaughtMonGen2(wram, cm)
                                     : -2;
+                        if (dest == -1) {
+                            // Party full — Gen 2 PC box writing is not yet
+                            // reliable (WRAM offset varies by ROM version).
+                            // User should deposit a Pokemon in-game first.
+                        }
                     } else {
-                        // Gen 1: write to SRAM
+                        // Gen 1: write to SRAM (party or PC box)
                         dest = DaycareSavPatcher::addCaughtMon(sram_, cm);
                     }
                     if (dest == 0) {
-                        snprintf(msg, sizeof(msg), "Gotcha! %s added to party!", foeName);
+                        snprintf(msg, sizeof(msg), "Gotcha! %s joined the party!", foeName);
+                        battle_->pushLog(msg);
+                    } else if (dest == 100) {
+                        snprintf(msg, sizeof(msg), "Gotcha! %s sent to PC!", foeName);
                         battle_->pushLog(msg);
                     } else if (dest >= 1) {
                         snprintf(msg, sizeof(msg), "Gotcha! %s to PC Box %d!", foeName, dest);
                         battle_->pushLog(msg);
                     } else if (dest == -1) {
-                        battle_->pushLog("Party is full!");
+                        battle_->pushLog("Party full! Deposit one in-game.");
                     } else {
-                        battle_->pushLog("Can't catch - save error!");
+                        battle_->pushLog("Catch failed - save unavailable!");
                     }
                     battle_->exit();
                     dirty_ = true;
@@ -610,12 +618,24 @@ void MatsuMonsterTerminal::onKeyboard(char ascii, uint32_t modifiers)
 
 void MatsuMonsterTerminal::onNavigation(int key)
 {
-    // Route navigation keys to the battle engine when active.
+    // Route navigation/gamepad keys to the battle engine when active.
+    // Maps physical Tanmatsu controls to the battle station's WASD+K/L scheme.
     if (battle_ && battle_->isActive()) {
-        if (key == BSP_INPUT_NAVIGATION_KEY_ESC)
-            battle_->handleKey(27);
-        else if (key == BSP_INPUT_NAVIGATION_KEY_RETURN)
-            battle_->handleKey('\r');
+        switch (key) {
+            case BSP_INPUT_NAVIGATION_KEY_UP:       battle_->handleKey('w'); break;
+            case BSP_INPUT_NAVIGATION_KEY_DOWN:     battle_->handleKey('s'); break;
+            case BSP_INPUT_NAVIGATION_KEY_LEFT:     battle_->handleKey('a'); break;
+            case BSP_INPUT_NAVIGATION_KEY_RIGHT:    battle_->handleKey('d'); break;
+            case BSP_INPUT_NAVIGATION_KEY_GAMEPAD_A:
+            case BSP_INPUT_NAVIGATION_KEY_RETURN:
+            case BSP_INPUT_NAVIGATION_KEY_SPACE_M:  battle_->handleKey('k'); break;
+            case BSP_INPUT_NAVIGATION_KEY_GAMEPAD_B:
+            case BSP_INPUT_NAVIGATION_KEY_BACKSPACE:battle_->handleKey('l'); break;
+            case BSP_INPUT_NAVIGATION_KEY_START:
+            case BSP_INPUT_NAVIGATION_KEY_ESC:      battle_->handleKey(27);  break;
+            case BSP_INPUT_NAVIGATION_KEY_SELECT:   battle_->handleKey('p'); break;
+            default: break;
+        }
         return;
     }
 

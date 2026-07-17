@@ -12,6 +12,7 @@
 #include "FastText.h"
 #include "Gen3Front565.h"
 #include "Gen3Back565.h"
+#include "RomSpriteExtract.h"
 #include "miniz.h"
 #include "esp_log.h"
 #include "esp_random.h"
@@ -102,7 +103,12 @@ static void renderSprite(pax_buf_t *fb, int dx, int dy,
                          uint8_t species, bool isBack, uint16_t bgColor565,
                          int scale = 2)
 {
-    if (!fb || species == 0 || species > 151) return;
+    if (!fb || species == 0) return;
+    if (species > 151) {
+        // Gen 2 species — extract from ROM (Crystal/Gold/Silver)
+        renderRomSprite(fb, dx, dy, species, isBack, c565to8888(bgColor565), scale);
+        return;
+    }
     int w = isBack ? GEN3_BACK_565_W  : GEN3_FRONT_565_W;
     int h = isBack ? GEN3_BACK_565_H  : GEN3_FRONT_565_H;
     const uint32_t *offs = isBack ? kGen3Back565Offsets  : kGen3Front565Offsets;
@@ -1454,7 +1460,7 @@ void MonsterMeshTextBattle::drawHpPanel(pax_buf_t *fb, uint8_t side, int y)
 void MonsterMeshTextBattle::drawMoveMenu(pax_buf_t *fb)
 {
     const auto &mon = engine_.party(0).mons[engine_.party(0).active];
-    int y = 296;   // inside the pokeball text box (starts at y=280)
+    int y = 372;   // below the log separator line
 
     static constexpr int colW = 360;
     static constexpr int rowH = 24;
@@ -1508,12 +1514,12 @@ void MonsterMeshTextBattle::drawMoveMenu(pax_buf_t *fb)
 void MonsterMeshTextBattle::drawSwitchMenu(pax_buf_t *fb)
 {
     const auto &p = engine_.party(0);
-    int yTop = 310;   // inside the pokeball text box
+    int yTop = 390;   // below the log separator
     int colW = SCREEN_W / 2 - 30;
     int rowH = 24;
 
     gfx_setTextColor(FG, BG);
-    gfx_setCursor(50, 290); gfx_print(fb, "Pick a Pokemon:");
+    gfx_setCursor(50, 372); gfx_print(fb, "Pick a Pokemon:");
 
     for (int i = 0; i < p.count && i < 6; ++i) {
         int col = i % 2;
@@ -1542,11 +1548,11 @@ void MonsterMeshTextBattle::drawLog(pax_buf_t *fb)
     // We dropped the per-line scrollPending throttle that was previously
     // here — it was revealing the newest line first at row 0 and back-
     // filling older lines below it, which read backwards.
-    // Render log inside the pokeball text box, with generous padding
-    int yBase = 296;
+    // Render last 3 log lines in the top portion of the text box (y=292-360)
+    int yBase = 292;
     int linePx = 22;
     gfx_setTextColor(FG, BG);
-    uint8_t maxShow = 5;
+    uint8_t maxShow = 3;
     uint8_t shown = logFill_ > maxShow ? maxShow : logFill_;
     for (uint8_t i = 0; i < shown; ++i) {
         int idx = (logHead_ + LOG_LINES - shown + i) % LOG_LINES;
@@ -1708,34 +1714,30 @@ void MonsterMeshTextBattle::render(pax_buf_t *fb)
         gfx_fillRect(fb, 10, boxY + boxH - 6, 6, 6, FG);
         gfx_fillRect(fb, SCREEN_W - 16, boxY + boxH - 6, 6, 6, FG);
     }
-    // Like the real Pokemon games: text box shows EITHER the action log
-    // OR the move/switch menu, not both at the same time.
+    // ── Always show the last 3 log lines at the TOP of the text box ──
+    // This lets the player see what happened (attacks, damage, status)
+    // while choosing their next move.
+    drawLog(fb);
+
+    // ── Separator line between log and menu ──
+    gfx_fillRect(fb, 30, 366, SCREEN_W - 60, 1, DIM);
+
+    // ── Menu/status in the BOTTOM portion of the text box ──
     if (phase_ == Phase::WAIT_SWITCH)      drawSwitchMenu(fb);
     else if (phase_ == Phase::WAIT_ACTION) drawMoveMenu(fb);
     else if (phase_ == Phase::WAIT_FLEE) {
-        int by = 300;
-        int bh = 56;
-        gfx_fillRect(fb, 8, by, SCREEN_W - 16, bh, DARK);
-        gfx_drawRect(fb, 8, by, SCREEN_W - 16, bh, ACC);
-        gfx_setTextColor(FG, DARK);
-        gfx_setCursor(20, by + 8);
-        gfx_print(fb, "Flee?");
-        gfx_setTextColor(DIM, DARK);
-        gfx_setCursor(20, by + 28);
-        gfx_print(fb, "K=yes  L/F=no");
+        gfx_setTextColor(FG, BG);
+        gfx_setCursor(50, 380);
+        gfx_print(fb, "Flee?  K=yes  L/F=no");
     }
-    else {
-        // WAIT_REMOTE, ANIMATING, FINISHED — show the battle log
-        drawLog(fb);
-        if (phase_ == Phase::WAIT_REMOTE) {
-            gfx_setTextColor(DIM, BG);
-            gfx_setCursor(50, 440);
-            gfx_print(fb, mode_ == Mode::NETWORKED ? "Waiting for opponent..." : "...");
-        } else if (phase_ == Phase::FINISHED) {
-            gfx_setTextColor(FG, BG);
-            gfx_setCursor(50, 440);
-            gfx_print(fb, endPromptOverride_[0] ? endPromptOverride_ : "Press any key to exit.");
-        }
+    else if (phase_ == Phase::WAIT_REMOTE) {
+        gfx_setTextColor(DIM, BG);
+        gfx_setCursor(50, 380);
+        gfx_print(fb, mode_ == Mode::NETWORKED ? "Waiting for opponent..." : "...");
+    } else if (phase_ == Phase::FINISHED) {
+        gfx_setTextColor(FG, BG);
+        gfx_setCursor(50, 380);
+        gfx_print(fb, endPromptOverride_[0] ? endPromptOverride_ : "Press any key to exit.");
     }
     dirty_ = false;
 }

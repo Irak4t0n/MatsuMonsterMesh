@@ -28,6 +28,15 @@ uint8_t gnuboy_mem_read_byte(uint16_t gb_addr);
 // Bank 0 = 0xC000-0xCFFF, banks 1-7 = switchable 0xD000-0xDFFF.
 uint8_t* gnuboy_wram_bank(int n);
 
+// Return a pointer to SRAM bank N (0-3 for Crystal's 32KB SRAM).
+// Bank 0 = general save, Bank 1 = active PC box, Banks 2-3 = stored boxes.
+// Returns NULL if gnuboy hasn't been initialised or bank is out of range.
+uint8_t* gnuboy_sram_bank(int n);
+
+// Mark SRAM as dirty so gnuboy saves it back to the file.
+// Call after writing to any SRAM bank.
+void gnuboy_sram_set_dirty(void);
+
 // Return the ROM title string (up to 16 chars, from the cart header).
 const char* gnuboy_rom_name(void);
 

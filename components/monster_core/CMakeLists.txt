@@ -20,6 +20,7 @@ idf_component_register(
         "LordRoutes.cpp"
         "LordLogic.cpp"
         "LordSave.cpp"
+        "RomSpriteExtract.cpp"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -29,6 +30,7 @@ idf_component_register(
         esp_timer
         esp_hw_support       # esp_random()
         esp_rom              # miniz (tinfl_decompress)
+        gnuboy               # rom.bank[] access for sprite extraction
         robotman2412__pax-gfx
 )
 

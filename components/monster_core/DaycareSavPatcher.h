@@ -1079,11 +1079,19 @@ public:
             out->species[i] = wram_bank1[G2_WRAM_SPECIES_LIST + i];
         out->species[count] = 0xFF;
 
-        // Map each 48-byte Gen 2 mon into the 44-byte Gen 1 struct
+        // Map each 48-byte Gen 2 mon into the 44-byte Gen 1 struct.
+        // Skip eggs — Crystal uses species 0xFD (253) in the species list for eggs.
+        uint8_t writeIdx = 0;
         for (uint8_t i = 0; i < count; ++i) {
+            // Check species list for egg marker (0xFD = 253)
+            uint8_t speciesListEntry = wram_bank1[G2_WRAM_SPECIES_LIST + i];
+            if (speciesListEntry == 0xFD || speciesListEntry == 0) continue; // skip eggs
+
             const uint8_t *g2 = &wram_bank1[G2_WRAM_POKEMON_DATA + i * G2_POKEMON_SIZE];
-            Gen1Pokemon &g1 = out->mons[i];
+
+            Gen1Pokemon &g1 = out->mons[writeIdx];
             memset(&g1, 0, sizeof(g1));
+            out->species[writeIdx] = g2[0x00]; // actual species dex number
 
             g1.species   = g2[0x00]; // dex number directly
             g1.hp[0]     = g2[0x22]; g1.hp[1] = g2[0x23];     // curHP
@@ -1115,28 +1123,30 @@ public:
             g1.def[0]    = g2[0x28]; g1.def[1]   = g2[0x29];
             g1.spd[0]    = g2[0x2A]; g1.spd[1]   = g2[0x2B];
             g1.spc[0]    = g2[0x2C]; g1.spc[1]   = g2[0x2D]; // use SpAtk as Spc
-        }
 
-        // Nicknames + OT names
-        for (uint8_t i = 0; i < count; ++i) {
+            // Copy nickname for this slot (from original party index i)
             const uint8_t *nickRaw = &wram_bank1[G2_WRAM_NICKNAMES + i * SAV_NAME_SIZE];
             for (int j = 0; j < 10; ++j) {
                 if (nickRaw[j] == SAV_STRING_TERMINATOR) {
-                    out->nicknames[i][j] = 0; break;
+                    out->nicknames[writeIdx][j] = 0; break;
                 }
-                out->nicknames[i][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
-                if (j == 9) out->nicknames[i][10] = 0;
+                out->nicknames[writeIdx][j] = (uint8_t)gen1CharToAscii(nickRaw[j]);
+                if (j == 9) out->nicknames[writeIdx][10] = 0;
             }
             const uint8_t *otRaw = &wram_bank1[G2_WRAM_OT_NAMES + i * SAV_NAME_SIZE];
             for (int j = 0; j < 10; ++j) {
                 if (otRaw[j] == SAV_STRING_TERMINATOR) {
-                    out->otNames[i][j] = 0; break;
+                    out->otNames[writeIdx][j] = 0; break;
                 }
-                out->otNames[i][j] = (uint8_t)gen1CharToAscii(otRaw[j]);
-                if (j == 9) out->otNames[i][10] = 0;
+                out->otNames[writeIdx][j] = (uint8_t)gen1CharToAscii(otRaw[j]);
+                if (j == 9) out->otNames[writeIdx][10] = 0;
             }
+            writeIdx++;
         }
-        return count;
+        // Update count to reflect actual non-egg Pokemon
+        out->count = writeIdx;
+        out->species[writeIdx] = 0xFF;
+        return writeIdx;
     }
 
     // ── Patch Gen 2 Pokemon XP/level directly in WRAM ─────────────────
@@ -1173,10 +1183,70 @@ public:
     // ── Add caught Pokemon to Gen 2 WRAM party ────────────────────────
     // Writes directly to live WRAM (party only, no PC support).
     // Returns 0 on success (added to party), -1 if party full.
+    // Write a caught Pokemon to Crystal's active PC box via WRAM.
+    // Crystal keeps the current box at WRAM bank 1, offset 0x194 ($D194).
+    // The game syncs this to SRAM when saving — no checksum issues.
+    // Box format: count(1) + species[21] + mons[20*32] + OT[20*11] + nicks[20*11]
+    // `wram_bank1` = gnuboy_wram_bank1() (the 4KB WRAM bank 1 buffer).
+    // Returns 1 on success, -1 if box full.
+    static int addCaughtMonGen2PC(uint8_t *wram_bank1, const CaughtMon &mon) {
+        if (!wram_bank1 || mon.dexNum == 0) return -1;
+
+        static constexpr int BOX_MAX      = 20;
+        static constexpr int BOX_MON_SIZE = 32;
+        // Offsets within WRAM bank 1 (from $D000 base)
+        // Active box at $D194 → offset 0x194 within bank 1
+        static constexpr int BOX_BASE     = 0x194;
+        static constexpr int BOX_COUNT    = BOX_BASE;
+        static constexpr int BOX_SPECIES  = BOX_BASE + 1;     // 21 bytes
+        static constexpr int BOX_MONS     = BOX_BASE + 22;    // 20 * 32 = 640
+        static constexpr int BOX_OT       = BOX_MONS + 640;   // 20 * 11 = 220
+        static constexpr int BOX_NICKS    = BOX_OT + 220;     // 20 * 11 = 220
+
+        uint8_t boxCount = wram_bank1[BOX_COUNT];
+        if (boxCount >= BOX_MAX) return -1;
+
+        uint8_t i = boxCount;
+        wram_bank1[BOX_COUNT] = boxCount + 1;
+        wram_bank1[BOX_SPECIES + i] = mon.dexNum;
+        wram_bank1[BOX_SPECIES + i + 1] = 0xFF;
+
+        uint8_t *bm = &wram_bank1[BOX_MONS + i * BOX_MON_SIZE];
+        memset(bm, 0, BOX_MON_SIZE);
+        bm[0x00] = mon.dexNum;
+        bm[0x01] = 0;
+        memcpy(&bm[0x02], mon.moves, 4);
+        bm[0x06] = 0x00; bm[0x07] = 0x01;
+        uint32_t exp = (mon.dexNum <= 251) ? expForLevel(mon.dexNum, mon.level) : 0;
+        bm[0x08] = (uint8_t)(exp >> 16);
+        bm[0x09] = (uint8_t)(exp >> 8);
+        bm[0x0A] = (uint8_t)(exp);
+        bm[0x15] = mon.dvs[0];
+        bm[0x16] = mon.dvs[1];
+        memcpy(&bm[0x17], mon.pp, 4);
+        bm[0x1B] = 70;
+        bm[0x1C] = 0;
+        bm[0x1D] = 0;
+        bm[0x1E] = 0;
+        bm[0x1F] = mon.level;
+
+        uint8_t *ot = &wram_bank1[BOX_OT + i * SAV_NAME_SIZE];
+        memset(ot, SAV_STRING_TERMINATOR, SAV_NAME_SIZE);
+        ot[0] = 0x8C; ot[1] = 0x84; ot[2] = 0x92; ot[3] = 0x87;
+
+        uint8_t *nick = &wram_bank1[BOX_NICKS + i * SAV_NAME_SIZE];
+        memset(nick, SAV_STRING_TERMINATOR, SAV_NAME_SIZE);
+        for (int j = 0; j < 10 && mon.nickname[j]; ++j)
+            nick[j] = asciiToGen1Char(mon.nickname[j]);
+
+        return 1;
+    }
+
     static int addCaughtMonGen2(uint8_t *wram_bank1, const CaughtMon &mon) {
         if (!wram_bank1 || mon.dexNum == 0) return -2;
         uint8_t count = wram_bank1[G2_WRAM_PARTY_COUNT];
-        if (count >= 6) return -1;  // party full
+
+        if (count >= 6) return -1;  // party full — caller should try PC
 
         uint8_t i = count;
         wram_bank1[G2_WRAM_PARTY_COUNT] = count + 1;

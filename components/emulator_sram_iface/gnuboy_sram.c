@@ -44,6 +44,16 @@ uint8_t* gnuboy_wram_bank(int n) {
     return (uint8_t*)ram.ibank[n];
 }
 
+uint8_t* gnuboy_sram_bank(int n) {
+    if (!gb_sram_present()) return NULL;
+    if (n < 0 || n >= mbc.ramsize) return NULL;
+    return (uint8_t*)ram.sbank[n];
+}
+
+void gnuboy_sram_set_dirty(void) {
+    if (gb_sram_present()) ram.sram_dirty = 1;
+}
+
 const char* gnuboy_rom_name(void) {
     return rom.name;
 }
