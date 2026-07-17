@@ -20,6 +20,8 @@ Session 15 (Jul 15-16 2026) — MQTT fix, PvP, visual battle station:
   sprites, white background, HP bars, pokeball-bordered text box, WASD+K/L input
 - Species handling: all readers normalize to dex numbers, engine skips internalToDex
 - Catch system: C key during wild battles, Gen 1 SRAM + Gen 2 WRAM support
+- `fixname <name>` terminal command to repair corrupted Crystal trainer name
+- Gen 2 PC box catch deferred (requires proper Crystal SRAM layout mapping)
 - Known upstream gaps: Gauntlet/mmg (0x70-0x76), Dungeon (0x80-0x86)
 
 ## Previous State (Session 14b)

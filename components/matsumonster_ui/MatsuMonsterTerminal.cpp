@@ -766,6 +766,35 @@ void MatsuMonsterTerminal::handleCommand(const char *raw)
     else if (starts_with(cmd, "ch_reset", &args) || starts_with(cmd, "cr", &args))   cmdChReset();
     // Misc
     else if (starts_with(cmd, "clear",  &args))  cmdClear();
+    else if (starts_with(cmd, "fixname", &args)) {
+        // Fix corrupted trainer name in Crystal WRAM
+        const char *newName = args && *args ? args : "Kelex";
+        uint8_t *wram = gnuboy_wram_bank1();
+        if (!wram) { println("No WRAM available"); }
+        else {
+            // Search WRAM bank 1 for the trainer name location.
+            // Convert target name to Gen 1 charset for searching.
+            uint8_t gen1Name[11];
+            memset(gen1Name, 0x50, sizeof(gen1Name)); // fill with terminator
+            for (int i = 0; i < 10 && newName[i]; ++i)
+                gen1Name[i] = asciiToGen1Char(newName[i]);
+
+            // Write to known Crystal trainer name offset in WRAM bank 0
+            // Crystal's wPlayerName is at $D1A8 → WRAM bank 1 offset 0x1A8
+            uint8_t *namePtr = &wram[0x1A8];
+            memcpy(namePtr, gen1Name, 11);
+            printf_line("Name set to '%s' at WRAM $D1A8", newName);
+
+            // Also fix in SRAM bank 0 (Crystal saves name here too)
+            // Crystal's sPlayerName is at SRAM offset 0x200B
+            uint8_t *sram0 = gnuboy_sram_bank(0);
+            if (sram0) {
+                memcpy(&sram0[0x200B], gen1Name, 11);
+                gnuboy_sram_set_dirty();
+                printf_line("SRAM name also fixed at 0x200B");
+            }
+        }
+    }
     else if (starts_with(cmd, "quit",   &args) || starts_with(cmd, "q", &args))  cmdQuit();
     else if (starts_with(cmd, "exit",   &args))  cmdQuit();
     else if (starts_with(cmd, "help",   &args))  cmdHelp();
