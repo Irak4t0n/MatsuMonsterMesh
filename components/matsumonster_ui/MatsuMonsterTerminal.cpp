@@ -387,11 +387,9 @@ void MatsuMonsterTerminal::pumpBattle()
                         uint8_t *wram = gnuboy_wram_bank1();
                         dest = wram ? DaycareSavPatcher::addCaughtMonGen2(wram, cm)
                                     : -2;
-                        if (dest == -1) {
-                            // Party full — Gen 2 PC box writing is not yet
-                            // reliable (WRAM offset varies by ROM version).
-                            // User should deposit a Pokemon in-game first.
-                        }
+                        // Gen 2 PC box writing requires exact Crystal SRAM
+                        // layout (with checksums) — not yet implemented safely.
+                        // For now, user must deposit a Pokemon in-game first.
                     } else {
                         // Gen 1: write to SRAM (party or PC box)
                         dest = DaycareSavPatcher::addCaughtMon(sram_, cm);
@@ -399,18 +397,21 @@ void MatsuMonsterTerminal::pumpBattle()
                     if (dest == 0) {
                         snprintf(msg, sizeof(msg), "Gotcha! %s joined the party!", foeName);
                         battle_->pushLog(msg);
+                        battle_->finishBattle();
                     } else if (dest == 100) {
                         snprintf(msg, sizeof(msg), "Gotcha! %s sent to PC!", foeName);
                         battle_->pushLog(msg);
+                        battle_->pushLog("Switch boxes in PC to see it.");
+                        battle_->finishBattle();
                     } else if (dest >= 1) {
                         snprintf(msg, sizeof(msg), "Gotcha! %s to PC Box %d!", foeName, dest);
                         battle_->pushLog(msg);
+                        battle_->finishBattle();
                     } else if (dest == -1) {
-                        battle_->pushLog("Party full! Deposit one in-game.");
+                        battle_->pushLog("Party full! Deposit in-game.");
                     } else {
-                        battle_->pushLog("Catch failed - save unavailable!");
+                        battle_->pushLog("Catch failed!");
                     }
-                    battle_->exit();
                     dirty_ = true;
                     panel_dirty_ = true;
                 } else {

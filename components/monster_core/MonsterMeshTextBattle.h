@@ -166,6 +166,9 @@ public:
     bool catchAttempted() const { return catchAttempted_; }
     void clearCatchAttempted() { catchAttempted_ = false; }
     void pushLog(const char *line) { appendLog(line); dirty_ = true; }
+    // End the battle gracefully — shows FINISHED screen with log visible.
+    // User presses any key to return to the terminal.
+    void finishBattle() { phase_ = Phase::FINISHED; dirty_ = true; }
     // True if the local player won the last battle.
     bool playerWon() const { return playerWon_; }
     // Short tag used for the opponent panel header (trainer name or "FOE").

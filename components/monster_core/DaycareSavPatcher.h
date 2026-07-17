@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "emulator_sram_iface.h"
+#include "esp_log.h"
 #include "PokemonData.h"   // for Gen1Party / Gen1Pokemon (used by buildGen1Party)
 
 // ── SRAM layout constants ──────────────────────────────────────────────────
@@ -1183,35 +1184,67 @@ public:
     // ── Add caught Pokemon to Gen 2 WRAM party ────────────────────────
     // Writes directly to live WRAM (party only, no PC support).
     // Returns 0 on success (added to party), -1 if party full.
-    // Write a caught Pokemon to Crystal's active PC box via WRAM.
-    // Crystal keeps the current box at WRAM bank 1, offset 0x194 ($D194).
-    // The game syncs this to SRAM when saving — no checksum issues.
-    // Box format: count(1) + species[21] + mons[20*32] + OT[20*11] + nicks[20*11]
-    // `wram_bank1` = gnuboy_wram_bank1() (the 4KB WRAM bank 1 buffer).
-    // Returns 1 on success, -1 if box full.
-    static int addCaughtMonGen2PC(uint8_t *wram_bank1, const CaughtMon &mon) {
-        if (!wram_bank1 || mon.dexNum == 0) return -1;
+    // Search WRAM bank 1 for a valid Gen 2 PC box header pattern.
+    // A valid box: count(0-20), then count species(1-253), then 0xFF.
+    // Returns offset within bank 1, or -1 if not found.
+    // Note: include esp_log.h before DaycareSavPatcher.h for logging.
+    static int findGen2BoxInWRAM(const uint8_t *wram_bank1) {
+        if (!wram_bank1) return -1;
+        // Scan plausible range (offsets 0x100-0xC00, box data is ~1100 bytes)
+        for (int off = 0x100; off < 0xC00; ++off) {
+            uint8_t count = wram_bank1[off];
+            if (count > 20) continue;
+            // Verify species list: count values in 1-253, then 0xFF
+            bool valid = true;
+            for (int s = 0; s < count; ++s) {
+                uint8_t sp = wram_bank1[off + 1 + s];
+                if (sp == 0 || sp == 0xFF) { valid = false; break; }
+            }
+            if (!valid) continue;
+            if (wram_bank1[off + 1 + count] != 0xFF) continue;
+            // Extra validation: if count > 0, check first mon's species
+            // matches the species list entry (offset: count_byte + 21 species + 0)
+            if (count > 0) {
+                uint8_t monSpecies = wram_bank1[off + 22];  // first mon's species byte
+                if (monSpecies != wram_bank1[off + 1]) continue;
+            }
+            // Check that there's enough room in WRAM for the full box
+            if (off + 22 + 20 * 32 + 20 * 11 + 20 * 11 > 4096) continue;
+            return off;
+        }
+        return -1;
+    }
+
+    // Write a caught Pokemon to Crystal's active PC box.
+    // `buf` can be either SRAM bank 1 or WRAM bank 1 — the box data
+    // starts at offset 0 in SRAM bank 1 (Crystal's "Active Box" section).
+    // When passing WRAM, use the dynamically found offset.
+    // Returns 1 on success, -1 if box full or invalid.
+    static int addCaughtMonGen2PC(uint8_t *buf, const CaughtMon &mon, int baseOff = 0) {
+        if (!buf || mon.dexNum == 0) return -1;
+        int base = baseOff;
+
+        ESP_LOGI("catch", "Gen2 PC write: base=0x%X, buf[0..7]=%02X %02X %02X %02X %02X %02X %02X %02X",
+                 base, buf[base], buf[base+1], buf[base+2], buf[base+3],
+                 buf[base+4], buf[base+5], buf[base+6], buf[base+7]);
 
         static constexpr int BOX_MAX      = 20;
         static constexpr int BOX_MON_SIZE = 32;
-        // Offsets within WRAM bank 1 (from $D000 base)
-        // Active box at $D194 → offset 0x194 within bank 1
-        static constexpr int BOX_BASE     = 0x194;
-        static constexpr int BOX_COUNT    = BOX_BASE;
-        static constexpr int BOX_SPECIES  = BOX_BASE + 1;     // 21 bytes
-        static constexpr int BOX_MONS     = BOX_BASE + 22;    // 20 * 32 = 640
-        static constexpr int BOX_OT       = BOX_MONS + 640;   // 20 * 11 = 220
-        static constexpr int BOX_NICKS    = BOX_OT + 220;     // 20 * 11 = 220
+        int BOX_COUNT   = base;
+        int BOX_SPECIES = base + 1;
+        int BOX_MONS    = base + 22;
+        int BOX_OT      = BOX_MONS + 20 * BOX_MON_SIZE;
+        int BOX_NICKS   = BOX_OT + 20 * SAV_NAME_SIZE;
 
-        uint8_t boxCount = wram_bank1[BOX_COUNT];
+        uint8_t boxCount = buf[BOX_COUNT];
         if (boxCount >= BOX_MAX) return -1;
 
         uint8_t i = boxCount;
-        wram_bank1[BOX_COUNT] = boxCount + 1;
-        wram_bank1[BOX_SPECIES + i] = mon.dexNum;
-        wram_bank1[BOX_SPECIES + i + 1] = 0xFF;
+        buf[BOX_COUNT] = boxCount + 1;
+        buf[BOX_SPECIES + i] = mon.dexNum;
+        buf[BOX_SPECIES + i + 1] = 0xFF;
 
-        uint8_t *bm = &wram_bank1[BOX_MONS + i * BOX_MON_SIZE];
+        uint8_t *bm = &buf[BOX_MONS + i * BOX_MON_SIZE];
         memset(bm, 0, BOX_MON_SIZE);
         bm[0x00] = mon.dexNum;
         bm[0x01] = 0;
@@ -1230,11 +1263,11 @@ public:
         bm[0x1E] = 0;
         bm[0x1F] = mon.level;
 
-        uint8_t *ot = &wram_bank1[BOX_OT + i * SAV_NAME_SIZE];
+        uint8_t *ot = &buf[BOX_OT + i * SAV_NAME_SIZE];
         memset(ot, SAV_STRING_TERMINATOR, SAV_NAME_SIZE);
         ot[0] = 0x8C; ot[1] = 0x84; ot[2] = 0x92; ot[3] = 0x87;
 
-        uint8_t *nick = &wram_bank1[BOX_NICKS + i * SAV_NAME_SIZE];
+        uint8_t *nick = &buf[BOX_NICKS + i * SAV_NAME_SIZE];
         memset(nick, SAV_STRING_TERMINATOR, SAV_NAME_SIZE);
         for (int j = 0; j < 10 && mon.nickname[j]; ++j)
             nick[j] = asciiToGen1Char(mon.nickname[j]);
